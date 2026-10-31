@@ -253,8 +253,18 @@ ui_summary() { # ui_summary <title> <line...>
 
 ui_confirm() { # ui_confirm <prompt>  -> returns 0 if yes
   if [ "${MCR_ASSUME_YES:-0}" = "1" ]; then return 0; fi
-  if [ "$UI_TTY" != "1" ]; then return 0; fi
   local ans=""
+  # When run via `curl ... | sudo bash` our stdin is the pipe, so a plain `read`
+  # hits EOF and would wrongly abort. Read the answer from the controlling
+  # terminal instead, so the prompt works even when the script is piped.
+  if [ -r /dev/tty ]; then
+    printf '   %s %s [y/N] ' "$(_c "$C_YELLOW" "?")" "$1" > /dev/tty
+    read -r ans < /dev/tty || true
+    case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
+  fi
+  # No controlling terminal at all (true unattended run): proceed, matching the
+  # non-interactive default. Pass --yes / MCR_ASSUME_YES=1 to be explicit.
+  if [ "$UI_TTY" != "1" ]; then return 0; fi
   printf '   %s %s [y/N] ' "$(_c "$C_YELLOW" "?")" "$1"
   read -r ans || true
   case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
