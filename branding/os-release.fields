@@ -1,0 +1,14 @@
+# Fields that MCR branding ADDS or OVERRIDES in /etc/os-release.
+# Applied by `mcrctl branding on`. ID, ID_LIKE and VERSION_ID are NEVER touched,
+# so package tooling and distro detection keep working. The original file is
+# backed up to /etc/os-release.mcr.bak first; `branding off` restores it.
+#
+# Override (replace existing key if present):
+PRETTY_NAME="MCRSOFT BY WOBOO.IO"
+NAME="MCRSOFT"
+# Add (MCR_* namespace + branded home url):
+MCR_VARIANT="Server OS"
+MCR_VERSION="1.0.0"
+HOME_URL="https://woboo.io"
+SUPPORT_URL="https://woboo.io/support"
+LOGO="mcrsoft"

@@ -1,0 +1,17 @@
+[Unit]
+Description=MCR Server OS web stack (ensures nginx/apache + php-fpm + mariadb)
+Documentation=https://woboo.io
+After=network-online.target mariadb.service
+Wants=network-online.target
+# This is a lightweight meta-unit: the real daemons are the distro's own
+# nginx/apache, php-fpm and mariadb units. It groups them for `systemctl
+# start mcr-web` and ensures they come up together.
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/local/bin/mcrctl start
+ExecStop=/usr/local/bin/mcrctl stop
+
+[Install]
+WantedBy=multi-user.target

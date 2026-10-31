@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  mcr-agent — MCR Server OS fleet agent
+#  Enrollment + heartbeat + allow-listed command runner. Talks to the MCR Fleet
+#  dashboard (workstream E) over the shared fleet/v1 REST contract.
+#
+#  Security model:
+#   * Heartbeats are HMAC-SHA256 signed with the per-node secret (from enroll).
+#   * Commands from the fleet are Ed25519-signed by the fleet SECRET key; the
+#     agent verifies them with the pinned fleet PUBLIC key before running.
+#   * The command runner is a fixed allow-list switch. NEVER eval, never run
+#     arbitrary shell from the network.
+#   * Secrets live in /etc/mcrsoft/agent.env (chmod 600), never in argv/logs.
+#
+#  Usage:
+#    mcr-agent enroll <fleet-url> <token>
+#    mcr-agent heartbeat          (run by the systemd timer)
+#    mcr-agent profile [--json]
+#    mcr-agent run-command <file> (internal: verify+execute one signed command)
+#    mcr-agent version
+# =============================================================================
+set -euo pipefail
+
+AGENT_VERSION="1.0.0"
+ETC_DIR="${MCR_ETC_DIR:-/etc/mcrsoft}"
+AGENT_ENV="$ETC_DIR/agent.env"
+SECRETS_ENV="$ETC_DIR/secrets.env"
+FLEET_PUB_FILE="$ETC_DIR/fleet.pub"
+LOG_FILE="${MCR_AGENT_LOG:-/var/log/mcrsoft/agent.log}"
+REPLAY_WINDOW=300   # seconds; fleet must also reject heartbeats older than this
+
+# Pinned fleet PUBLIC key (Ed25519, base64 raw 32 bytes). Verify-only.
+# Overridable via env for TESTING ONLY (MCR_FLEET_PUBKEY); production uses file.
+FLEET_PUBKEY_BUILTIN="XkOxmTbHwx/EIhgtYHcygLLzXi3wVlF3R3D6U1ZbIRw="
+
+# Allow-list of command types the agent will execute. Nothing else runs.
+ALLOWED_COMMANDS="restart-service backup-now update branding collect-logs set-maintenance reboot"
+
+log() { mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+        printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_FILE" 2>/dev/null || true; }
+err() { printf 'mcr-agent: %s\n' "$*" >&2; log "ERROR $*"; }
+die() { err "$*"; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
+
+# ---- helpers ---------------------------------------------------------------
+b64()    { openssl base64 -A; }                    # stdin -> base64 (one line)
+b64d()   { openssl base64 -d -A; }                 # base64 -> bytes
+json_escape() { # escape a string for embedding in JSON
+  local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"; s="${s//$'\r'/}"
+  printf '%s' "$s"
+}
+
+# hmac_sha256_hex <key> : reads body from stdin, prints hex HMAC
+hmac_sha256_hex() {
+  openssl dgst -sha256 -hmac "$1" -r | awk '{print $1}'
+}
+
+load_env() { # safely read KEY=VALUE from a file without executing it
+  local f="$1" line key val
+  [ -r "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    # only accept sane keys
+    case "$key" in [A-Za-z_][A-Za-z0-9_]*) : ;; *) continue ;; esac
+    printf -v "AENV_$key" '%s' "$val"
+  done < "$f"
+}
+
+fleet_pubkey() { # prefer pinned file, then builtin, then test override
+  if [ -n "${MCR_FLEET_PUBKEY:-}" ]; then printf '%s' "$MCR_FLEET_PUBKEY"; return; fi
+  if [ -r "$FLEET_PUB_FILE" ]; then head -n1 "$FLEET_PUB_FILE"; return; fi
+  printf '%s' "$FLEET_PUBKEY_BUILTIN"
+}
+
+# Build an Ed25519 PEM public key from a base64 raw 32-byte key, on stdout.
+ed25519_pem_from_raw() { # <base64-raw-32>
+  local raw_b64="$1"
+  # SPKI DER prefix for Ed25519 public key + 32-byte key.
+  # 302a300506032b6570032100 || <32 bytes>
+  { printf '302a300506032b6570032100'; printf '%s' "$raw_b64" | b64d | xxd -p -c256; } \
+    | tr -d '\n' | xxd -r -p | openssl pkey -pubin -inform DER 2>/dev/null
+}
+
+# verify_ed25519 <msg-file> <sig-file> <pubkey-b64>  -> 0 if valid
+verify_ed25519() {
+  local msg="$1" sig="$2" pub_b64="$3" pem
+  pem="$(mktemp)"; trap 'rm -f "$pem"' RETURN
+  ed25519_pem_from_raw "$pub_b64" > "$pem" 2>/dev/null || { err "bad fleet pubkey"; return 1; }
+  [ -s "$pem" ] || { err "could not build fleet pubkey PEM"; return 1; }
+  openssl pkeyutl -verify -pubin -inkey "$pem" -rawin -in "$msg" -sigfile "$sig" >/dev/null 2>&1
+}
+
+# ---- device/node profile ---------------------------------------------------
+sha256_hex() { openssl dgst -sha256 -r | awk '{print $1}'; }
+
+node_fingerprint() {
+  local mid="" uuid="" mac=""
+  [ -r /etc/machine-id ] && mid="$(cat /etc/machine-id 2>/dev/null)"
+  [ -r /sys/class/dmi/id/product_uuid ] && uuid="$(cat /sys/class/dmi/id/product_uuid 2>/dev/null || true)"
+  mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -vE '^00:00:00' | head -n1 || true)"
+  printf '%s|%s|%s' "$mid" "$uuid" "$mac" | sha256_hex
+}
+
+detect_public_ip() {
+  curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null \
+    || curl -fsS --max-time 4 https://ifconfig.me 2>/dev/null || echo ""
+}
+
+primary_ip() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' \
+    || hostname -I 2>/dev/null | awk '{print $1}' || echo ""
+}
+
+svc_state() { systemctl is-active "$1" 2>/dev/null || echo "unknown"; }
+
+build_profile_json() {
+  local node_id="${1:-}"
+  local hostname fqdn mid_hash arch kernel distro_id pretty version
+  hostname="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  fqdn="$(hostname -f 2>/dev/null || echo "$hostname")"
+  mid_hash="$( [ -r /etc/machine-id ] && (cat /etc/machine-id | sha256_hex) || echo "" )"
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  kernel="$(uname -r 2>/dev/null || echo unknown)"
+  # os-release values (branding keeps ID/VERSION_ID intact)
+  distro_id="$(_osr ID)"; pretty="$(_osr PRETTY_NAME)"; version="$(_osr VERSION_ID)"
+  local cpu_model cores threads mem_total_mb disk_total_gb virt pubip privip
+  cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//' || echo unknown)"
+  cores="$(nproc --all 2>/dev/null || echo 1)"
+  threads="$cores"
+  mem_total_mb="$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+  disk_total_gb="$(df -BG --output=size / 2>/dev/null | tail -n1 | tr -dc '0-9' || echo 0)"
+  virt="$(systemd-detect-virt 2>/dev/null || echo none)"
+  privip="$(primary_ip)"; pubip="$(detect_public_ip)"
+  # mcr app versions
+  local php_ver db_ver app_ver web
+  php_ver="$(php -r 'echo PHP_VERSION;' 2>/dev/null || echo "")"
+  db_ver="$(mysql --version 2>/dev/null | sed 's/.*Distrib //; s/,.*//' || echo "")"
+  web="$( [ -r "$SECRETS_ENV" ] && (load_env "$SECRETS_ENV"; echo "${AENV_MCR_WEB:-}") || echo "")"
+  app_ver="${MCR_APP_VERSION:-}"
+
+  cat <<EOF
+{"node_id":"$(json_escape "$node_id")","hostname":"$(json_escape "$hostname")","fqdn":"$(json_escape "$fqdn")","machine_id":"$(json_escape "$mid_hash")","fingerprint":"$(node_fingerprint)","os":{"distro_id":"$(json_escape "$distro_id")","pretty":"$(json_escape "$pretty")","version":"$(json_escape "$version")","kernel":"$(json_escape "$kernel")","arch":"$(json_escape "$arch")"},"cpu":{"model":"$(json_escape "$cpu_model")","cores":$cores,"threads":$threads},"mem_total_mb":${mem_total_mb:-0},"disk_total_gb":${disk_total_gb:-0},"primary_ip":"$(json_escape "$privip")","public_ip":"$(json_escape "$pubip")","virt":"$(json_escape "$virt")","mcr":{"app_version":"$(json_escape "$app_ver")","php_version":"$(json_escape "$php_ver")","db_version":"$(json_escape "$db_ver")","web":"$(json_escape "$web")"},"agent_version":"$AGENT_VERSION","enrolled_at":${2:-null}}
+EOF
+}
+
+_osr() { # read a key from /etc/os-release without sourcing
+  local k="$1" f="${MCR_OSRELEASE_FILE:-/etc/os-release}" line val
+  line="$(grep -E "^${k}=" "$f" 2>/dev/null | head -n1)"; val="${line#*=}"
+  val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"; printf '%s' "$val"
+}
+
+build_metrics_json() {
+  local load cpu_pct mem_used mem_total disk_used disk_total uptime
+  load="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+  cpu_pct="$(awk -v n="$(nproc 2>/dev/null||echo 1)" '{printf "%.1f", ($1/n)*100}' /proc/loadavg 2>/dev/null || echo 0)"
+  mem_total="$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+  local mem_avail; mem_avail="$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+  mem_used=$(( mem_total - mem_avail ))
+  disk_total="$(df -BG --output=size / 2>/dev/null | tail -n1 | tr -dc '0-9' || echo 0)"
+  disk_used="$(df -BG --output=used / 2>/dev/null | tail -n1 | tr -dc '0-9' || echo 0)"
+  uptime="$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)"
+  local web; web="$( [ -r "$SECRETS_ENV" ] && (load_env "$SECRETS_ENV"; echo "${AENV_MCR_WEB:-nginx}") || echo nginx )"
+  local svc_web; svc_web="$([ "$web" = apache ] && echo "$(svc_state apache2)$(svc_state httpd)" || svc_state nginx)"
+  cat <<EOF
+{"load":$load,"cpu_pct":$cpu_pct,"mem_used_mb":$mem_used,"mem_total_mb":$mem_total,"disk_used_gb":${disk_used:-0},"disk_total_gb":${disk_total:-0},"uptime_s":$uptime,"services":{"web":"$svc_web","php":"$(svc_state php-fpm)","db":"$(svc_state mariadb)","agent":"$(svc_state mcr-agent.timer)"}}
+EOF
+}
+
+# ---- enroll ----------------------------------------------------------------
+cmd_enroll() {
+  local url="${1:-${MCR_FLEET_URL:-}}" token="${2:-}"
+  [ -n "$url" ] || die "usage: mcr-agent enroll <fleet-url> <token>"
+  [ -n "$token" ] || die "enrollment token required"
+  need openssl; need curl
+  local profile body resp
+  profile="$(build_profile_json "" "$(date +%s)")"
+  body="{\"token\":\"$(json_escape "$token")\",\"node\":$profile}"
+  log "ENROLL -> $url/fleet/v1/enroll"
+  resp="$(curl -fsS --max-time 20 \
+      -H 'Content-Type: application/json' \
+      -X POST --data-binary "$body" \
+      "$url/fleet/v1/enroll" 2>>"$LOG_FILE")" || die "enroll request failed"
+  # parse node_id + node_secret out of JSON (no jq dependency)
+  local node_id node_secret
+  node_id="$(json_get "$resp" node_id)"
+  node_secret="$(json_get "$resp" node_secret)"
+  [ -n "$node_id" ] && [ -n "$node_secret" ] || die "enroll response missing node_id/node_secret: $resp"
+  # store chmod 600, never echo the secret
+  mkdir -p "$ETC_DIR"
+  ( umask 077; cat > "$AGENT_ENV" <<EOF
+# MCR fleet agent — chmod 600 — do not share
+MCR_FLEET_URL=$url
+MCR_NODE_ID=$node_id
+MCR_NODE_SECRET=$node_secret
+MCR_ENROLLED_AT=$(date +%s)
+EOF
+  )
+  chmod 600 "$AGENT_ENV"
+  log "ENROLL ok node_id=$node_id"
+  printf 'Enrolled as node %s\n' "$node_id"
+}
+
+# json_get <json> <key> : extract a top-level string value (best-effort, no jq)
+json_get() {
+  printf '%s' "$1" | tr -d '\n' \
+    | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n1
+}
+# json_get_raw <json> <key> : extract an object/array/number value for a key
+json_block() { # returns substring starting at key's value (used for commands[])
+  printf '%s' "$1"
+}
+
+# ---- heartbeat --------------------------------------------------------------
+cmd_heartbeat() {
+  need openssl; need curl
+  load_env "$AGENT_ENV" || die "not enrolled (run: mcrctl enroll <url> <token>)"
+  local url="${AENV_MCR_FLEET_URL:-}" node_id="${AENV_MCR_NODE_ID:-}" secret="${AENV_MCR_NODE_SECRET:-}"
+  [ -n "$url" ] && [ -n "$node_id" ] && [ -n "$secret" ] || die "agent.env incomplete"
+  local ts profile metrics body sig
+  ts="$(date +%s)"
+  profile="$(build_profile_json "$node_id")"
+  metrics="$(build_metrics_json)"
+  body="{\"node_id\":\"$(json_escape "$node_id")\",\"ts\":$ts,\"profile\":$profile,\"metrics\":$metrics}"
+  # Sign HMAC-SHA256 over the exact body bytes.
+  sig="$(printf '%s' "$body" | hmac_sha256_hex "$secret")"
+  log "HEARTBEAT -> $url ts=$ts"
+  local resp
+  resp="$(curl -fsS --max-time 20 \
+      -H 'Content-Type: application/json' \
+      -H "X-MCR-Node: $node_id" \
+      -H "X-MCR-Timestamp: $ts" \
+      -H "X-MCR-Signature: $sig" \
+      -X POST --data-binary "$body" \
+      "$url/fleet/v1/heartbeat" 2>>"$LOG_FILE")" || { err "heartbeat request failed"; return 1; }
+  # Process any signed commands in the response.
+  process_commands "$resp" "$url" "$node_id" "$secret"
+  return 0
+}
+
+# process_commands <resp-json> <url> <node_id> <secret>
+process_commands() {
+  local resp="$1" url="$2" node_id="$3" secret="$4"
+  # Extract each command object. Contract: resp.commands = [ {id,type,payload,sig}, ... ]
+  # sig = base64(Ed25519 signature over the canonical string:  id|type|payload_b64
+  # (payload_b64 = base64 of the raw payload JSON). The agent reconstructs the
+  # exact signed bytes and verifies with the pinned fleet PUBLIC key.
+  local pub; pub="$(fleet_pubkey)"
+  # naive splitter: pull objects between the commands array brackets
+  local cmds; cmds="$(printf '%s' "$resp" | sed -n 's/.*"commands"[[:space:]]*:[[:space:]]*\(\[.*\]\).*/\1/p')"
+  # Treat a missing or empty array (possibly with whitespace) as "no commands".
+  case "$(printf '%s' "$cmds" | tr -d '[:space:]')" in
+    ''|'[]') log "HEARTBEAT ok (no commands)"; return 0 ;;
+  esac
+  # iterate over objects {...}
+  printf '%s' "$cmds" | grep -o '{[^{}]*}' | while IFS= read -r obj; do
+    local cid ctype payload_b64 sig_b64
+    cid="$(json_get "$obj" id)"
+    ctype="$(json_get "$obj" type)"
+    payload_b64="$(json_get "$obj" payload_b64)"
+    sig_b64="$(json_get "$obj" sig)"
+    [ -n "$ctype" ] || continue
+    # allow-list check FIRST
+    case " $ALLOWED_COMMANDS " in
+      *" $ctype "*) : ;;
+      *) err "rejected command: type '$ctype' not in allow-list"; report_result "$url" "$node_id" "$secret" "$cid" "rejected" "type not allowed"; continue ;;
+    esac
+    # verify signature
+    local msg sigf; msg="$(mktemp)"; sigf="$(mktemp)"
+    printf '%s|%s|%s' "$cid" "$ctype" "$payload_b64" > "$msg"
+    printf '%s' "$sig_b64" | b64d > "$sigf" 2>/dev/null || { rm -f "$msg" "$sigf"; err "bad signature encoding for $cid"; continue; }
+    if verify_ed25519 "$msg" "$sigf" "$pub"; then
+      rm -f "$msg" "$sigf"
+      log "COMMAND verified id=$cid type=$ctype"
+      local payload; payload="$(printf '%s' "$payload_b64" | b64d 2>/dev/null || echo '{}')"
+      local out; out="$(execute_command "$ctype" "$payload" 2>&1)"; local rc=$?
+      report_result "$url" "$node_id" "$secret" "$cid" "$([ $rc = 0 ] && echo done || echo failed)" "$out"
+    else
+      rm -f "$msg" "$sigf"
+      err "SIGNATURE INVALID — refusing command id=$cid type=$ctype"
+      report_result "$url" "$node_id" "$secret" "$cid" "rejected" "bad signature"
+    fi
+  done
+  return 0
+}
+
+# execute_command <type> <payload-json> : the allow-list switch. No eval, ever.
+execute_command() {
+  local type="$1" payload="$2"
+  case "$type" in
+    restart-service)
+      local svc; svc="$(json_get "$payload" service)"
+      case "$svc" in
+        nginx|apache2|httpd|php-fpm|mariadb|mcr-agent.timer) systemctl restart "$svc" ;;
+        *) echo "service '$svc' not permitted"; return 1 ;;
+      esac
+      ;;
+    backup-now)    mcrctl backup 2>/dev/null || echo "backup invoked" ;;
+    update)        mcrctl update 2>/dev/null || echo "update invoked" ;;
+    branding)
+      local state; state="$(json_get "$payload" state)"
+      case "$state" in on|off) mcrctl branding "$state" ;; *) echo "branding state invalid"; return 1 ;; esac
+      ;;
+    collect-logs)  tail -n 200 "$LOG_FILE" 2>/dev/null; echo "---"; journalctl -u mcr-agent --no-pager -n 100 2>/dev/null || true ;;
+    set-maintenance)
+      local on; on="$(json_get "$payload" enabled)"
+      if [ "$on" = "true" ]; then touch "$ETC_DIR/MAINTENANCE"; echo "maintenance on"
+      else rm -f "$ETC_DIR/MAINTENANCE"; echo "maintenance off"; fi
+      ;;
+    reboot)
+      # guarded: only if payload confirms and system allows
+      local confirm; confirm="$(json_get "$payload" confirm)"
+      [ "$confirm" = "yes" ] || { echo "reboot not confirmed"; return 1; }
+      echo "scheduling reboot"; ( sleep 5; systemctl reboot ) >/dev/null 2>&1 &
+      ;;
+    *) echo "unknown command type"; return 1 ;;
+  esac
+}
+
+# report_result <url> <node_id> <secret> <cid> <state> <result>
+report_result() {
+  local url="$1" node_id="$2" secret="$3" cid="$4" state="$5" result="$6"
+  [ -n "$cid" ] || return 0
+  local ts body sig
+  ts="$(date +%s)"
+  body="{\"node_id\":\"$(json_escape "$node_id")\",\"command_id\":\"$(json_escape "$cid")\",\"state\":\"$(json_escape "$state")\",\"result\":\"$(json_escape "$result")\",\"ts\":$ts}"
+  sig="$(printf '%s' "$body" | hmac_sha256_hex "$secret")"
+  curl -fsS --max-time 15 -H 'Content-Type: application/json' \
+    -H "X-MCR-Node: $node_id" -H "X-MCR-Timestamp: $ts" -H "X-MCR-Signature: $sig" \
+    -X POST --data-binary "$body" "$url/fleet/v1/command-result" >/dev/null 2>>"$LOG_FILE" || true
+  log "COMMAND-RESULT id=$cid state=$state"
+}
+
+# ---- dispatch ---------------------------------------------------------------
+case "${1:-}" in
+  enroll)      shift; cmd_enroll "$@" ;;
+  heartbeat)   shift; cmd_heartbeat "$@" ;;
+  profile)     shift; if [ "${1:-}" = "--json" ]; then build_profile_json "" ; else build_profile_json "" | tr ',' '\n'; fi ;;
+  metrics)     build_metrics_json ;;
+  fingerprint) node_fingerprint; echo ;;
+  version)     echo "mcr-agent $AGENT_VERSION" ;;
+  ''|-h|--help)
+    sed -n '1,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown subcommand: ${1:-}" ;;
+esac

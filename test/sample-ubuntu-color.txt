@@ -1,0 +1,108 @@
+
+   [36m[1m __  __  ____ ____  ____   ___  _____ _____(B[m
+   [36m[1m|  \/  |/ ___|  _ \/ ___| / _ \|  ___|_   _|(B[m
+   [36m[1m| |\/| | |   | |_) \___ \| | | | |_    | |(B[m
+   [36m[1m| |  | | |___|  _ < ___) | |_| |  _|   | |(B[m
+   [36m[1m|_|  |_|\____|_| \_\____/ \___/|_|     |_|(B[m
+   [36m[1m            B Y   W O B O O . I O(B[m
+
+   [38;5;245mUniversal MCR server provisioning  ·  https://woboo.io(B[m
+
+   [33m!(B[m [33mDRY-RUN: no changes will be made. Proving the flow only.(B[m
+   [34m╭(B[m[34m─(B[m [1mTarget system(B[m [34m──────────────────────────────────────────────────────────(B[m[34m╮(B[m
+   [34m│(B[m Distro     : ubuntu (ubuntu) 22.04 on x86_64                             [34m│(B[m
+   [34m│(B[m Pkg manager: apt-get (deb)                                               [34m│(B[m
+   [34m│(B[m Web server : nginx                                                       [34m│(B[m
+   [34m│(B[m Domain     : demo.woboo.io                                               [34m│(B[m
+   [34m│(B[m TLS        : certbot                                                     [34m│(B[m
+   [34m│(B[m Fleet      : <not enrolling>                                             [34m│(B[m
+   [34m╰(B[m[34m──────────────────────────────────────────────────────────────────────────(B[m[34m╯(B[m
+
+   [35m[1m[1/9](B[m [2m•(B[m Refresh repositories & install base tools
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get update -y(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends unzip curl git ca-certificates openssl rsync tar gzip(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends fastfetch(B[m
+   [35m[1m[1/9](B[m [32m✓(B[m Refresh repositories & install base tools [38;5;245m(1s)(B[m
+   [35m[1m[2/9](B[m [2m•(B[m Install web server (nginx)
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends nginx(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl enable --now nginx(B[m
+   [35m[1m[2/9](B[m [32m✓(B[m Install web server (nginx) [38;5;245m(0s)(B[m
+   [35m[1m[3/9](B[m [2m•(B[m Install PHP-FPM (>=8.1) + extensions
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-intl php-bcmath(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl enable --now php-fpm(B[m
+   [35m[1m[3/9](B[m [32m✓(B[m Install PHP-FPM (>=8.1) + extensions [38;5;245m(0s)(B[m
+   [35m[1m[4/9](B[m [2m•(B[m Install & initialise MariaDB
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends mariadb-server mariadb-client(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl enable --now mariadb(B[m
+   [35m[1m[4/9](B[m [32m✓(B[m Install & initialise MariaDB [38;5;245m(1s)(B[m
+   [35m[1m[5/9](B[m [2m•(B[m Create database, app user & secrets
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/etc/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/opt/mcrsoft/www'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/opt/mcrsoft/data'(B[m
+      [38;5;245m(dry-run write)(B[m [38;5;245m/etc/mcrsoft/secrets.env(B[m (chmod 600)
+      [38;5;245m(dry-run mysql)(B[m create db/user mcr_app (password redacted)
+      [38;5;245mNo app bundle supplied; web root prepared at /opt/mcrsoft/www(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245m[ -f '/opt/mcrsoft/www/index.html' ] || printf '%s\n' '<h1>MCRSOFT BY WOBOO.IO</h1><p>Server ready.</p>' > '/opt/mcrsoft/www/index.html'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mid mcrsoft >/dev/null 2>&1 || useradd --system --home '/opt/mcrsoft' --shell /usr/sbin/nologin mcrsoft || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mchown -R mcrsoft:mcrsoft '/opt/mcrsoft' 2>/dev/null || true(B[m
+   [35m[1m[5/9](B[m [32m✓(B[m Create database, app user & secrets [38;5;245m(2s)(B[m
+   [35m[1m[6/9](B[m [2m•(B[m Apply MCRSOFT branding (os-release, fastfetch, MOTD)
+      [38;5;245m(dry-run sh)(B[m [38;5;245minstall -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mchmod 0755 /usr/local/bin/mcrctl(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/usr/local/lib/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/etc/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/ui.sh' '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp -r '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding' '/etc/mcrsoft/branding-src' 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/etc/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/logo.txt' '/etc/mcrsoft/logo.txt'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/mcrsoft-release' /etc/mcrsoft-release(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/fastfetch.jsonc' '/etc/mcrsoft/fastfetch.jsonc'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/neofetch.conf' '/etc/mcrsoft/neofetch.conf'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/motd' /etc/motd(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/profile.d-mcrsoft.sh' /etc/profile.d/mcrsoft.sh && chmod 0644 /etc/profile.d/mcrsoft.sh(B[m
+      [38;5;245m(dry-run)(B[m back up /etc/os-release then set PRETTY_NAME/NAME + MCR_* (keep ID/ID_LIKE/VERSION_ID)
+      [38;5;245m(dry-run)(B[m install neofetch config for root + /etc/skel + existing users
+      [38;5;245mbranding on: neofetch/fastfetch now show MCRSOFT BY WOBOO.IO(B[m
+   [35m[1m[6/9](B[m [32m✓(B[m Apply MCRSOFT branding (os-release, fastfetch, MOTD) [38;5;245m(2s)(B[m
+   [35m[1m[7/9](B[m [2m•(B[m Configure firewall & TLS
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends ufw(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl enable --now ufw(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245mufw --force enable(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245mufw allow 22/tcp(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245mufw allow 80/tcp(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245mufw allow 443/tcp(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mapt-get install -y --no-install-recommends certbot python3-certbot-nginx(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245mcertbot --nginx -n --agree-tos -m a@b.io -d demo.woboo.io(B[m
+   [35m[1m[7/9](B[m [32m✓(B[m Configure firewall & TLS [38;5;245m(1s)(B[m
+   [35m[1m[8/9](B[m [2m•(B[m Install mcrctl, mcr-agent & systemd units
+      [38;5;245m(dry-run sh)(B[m [38;5;245minstall -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mchmod 0755 /usr/local/bin/mcrctl(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/usr/local/lib/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mmkdir -p '/etc/mcrsoft'(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/ui.sh' '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp -r '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding' '/etc/mcrsoft/branding-src' 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245minstall -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcr-agent' /usr/local/bin/mcr-agent 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcr-agent' /usr/local/bin/mcr-agent(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mchmod 0755 /usr/local/bin/mcr-agent(B[m
+      [38;5;245m(dry-run)(B[m write /etc/mcrsoft/fleet.pub
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-agent.service' /etc/systemd/system/ 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-agent.timer' /etc/systemd/system/ 2>/dev/null || true(B[m
+      [38;5;245m(dry-run sh)(B[m [38;5;245mcp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-web.service' /etc/systemd/system/ 2>/dev/null || true(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl daemon-reload(B[m
+      [38;5;245m(dry-run)(B[m [38;5;245msystemctl enable --now mcr-agent.timer(B[m
+   [35m[1m[8/9](B[m [32m✓(B[m Install mcrctl, mcr-agent & systemd units [38;5;245m(1s)(B[m
+   [35m[1m[9/9](B[m [2m•(B[m Enroll with MCR Fleet
+      [38;5;245mNo --fleet-url/--enroll-token; skipping enrollment(B[m
+   [35m[1m[9/9](B[m [32m✓(B[m Enroll with MCR Fleet [38;5;245m(0s)(B[m
+
+
+   [34m╭(B[m[34m─(B[m [1mInstallation complete — MCRSOFT BY WOBOO.IO(B[m [34m──────────────────────────(B[m[34m╮(B[m
+   [34m│(B[m Site URL     : https://demo.woboo.io/                                    [34m│(B[m
+   [34m│(B[m Web root     : /opt/mcrsoft/www                                          [34m│(B[m
+   [34m│(B[m Secrets      : /etc/mcrsoft/secrets.env (chmod 600)                      [34m│(B[m
+   [34m│(B[m Admin CLI    : mcrctl status                                             [34m│(B[m
+   [34m│(B[m Branding     : neofetch / fastfetch now show 'MCRSOFT BY WOBOO.IO'       [34m│(B[m
+   [34m│(B[m Fleet agent  : systemctl status mcr-agent.timer                          [34m│(B[m
+   [34m│(B[m Install log  : /tmp/tmp.sdi27cH3PI/log                                   [34m│(B[m
+   [34m╰(B[m[34m──────────────────────────────────────────────────────────────────────────(B[m[34m╯(B[m
+
+      [38;5;245mDB credentials are stored only in /etc/mcrsoft/secrets.env (never printed).(B[m

@@ -1,0 +1,14 @@
+# Never commit secrets or private keys (defence in depth — none live here anyway).
+*secret*
+*signing*.json
+*.pem
+*.key
+id_ed25519*
+secrets/
+# Local/runtime noise
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+suite.tar.gz
+mcr-server-os.tar.gz

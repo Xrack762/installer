@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  mcrctl — MCR Server OS admin CLI
+#  status | start | stop | restart | backup | restore | update | license
+#  enroll <url> <token> | node | branding on|off | uninstall | version
+# =============================================================================
+set -euo pipefail
+
+MCRCTL_VERSION="1.0.0"
+ETC_DIR="${MCR_ETC_DIR:-/etc/mcrsoft}"
+LIB_DIR="${MCR_LIB_DIR:-/usr/local/lib/mcrsoft}"
+BRANDING_SRC="${MCR_BRANDING_SRC:-$ETC_DIR/branding-src}"
+SECRETS_ENV="$ETC_DIR/secrets.env"
+AGENT_ENV="$ETC_DIR/agent.env"
+APP_ROOT="/opt/mcrsoft"
+
+# UI + distro libs if available (graceful fallback to plain echo).
+if [ -r "$LIB_DIR/ui.sh" ]; then . "$LIB_DIR/ui.sh"; ui_init; else
+  UI_COLOR=0; C_RESET=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""; C_CYAN=""; C_GREY=""
+  _c(){ shift; printf '%s' "$*"; }
+  ui_info(){ printf ' > %s\n' "$*"; }; ui_warn(){ printf ' ! %s\n' "$*"; }
+  ui_error(){ printf ' x %s\n' "$*" >&2; }; ui_note(){ printf '   %s\n' "$*"; }
+  ui_box(){ local t="$1"; shift; printf '== %s ==\n' "$t"; for l in "$@"; do printf '  %s\n' "$l"; done; }
+  ui_confirm(){ return 0; }
+fi
+if [ -r "$LIB_DIR/distro.sh" ]; then . "$LIB_DIR/distro.sh"; distro_detect 2>/dev/null || true; fi
+
+die() { ui_error "$*"; exit 1; }
+require_root() { [ "$(id -u 2>/dev/null || echo 0)" = "0" ] || die "mcrctl must run as root"; }
+
+JSON_OUT=0
+services_list() {
+  local web="nginx"
+  if [ -r "$SECRETS_ENV" ]; then web="$(sed -n 's/^MCR_WEB=//p' "$SECRETS_ENV" | head -n1)"; fi
+  case "$web" in apache) echo "apache2 httpd php-fpm mariadb mcr-agent.timer" ;; *) echo "nginx php-fpm mariadb mcr-agent.timer" ;; esac
+}
+
+svc_each() { # svc_each <action>
+  local action="$1" s
+  for s in $(services_list); do
+    systemctl "$action" "$s" >/dev/null 2>&1 && ui_info "$action $s: ok" || ui_warn "$action $s: skipped/not present"
+  done
+}
+
+cmd_status() {
+  if [ "$JSON_OUT" = "1" ]; then
+    printf '{'
+    local first=1 s st
+    for s in $(services_list); do
+      st="$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
+      [ "$first" = 1 ] || printf ','; first=0
+      printf '"%s":"%s"' "$s" "$st"
+    done
+    printf '}\n'; return 0
+  fi
+  ui_box "MCRSOFT BY WOBOO.IO — service status" \
+    "$(for s in $(services_list); do printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"; done)"
+  echo
+  if command -v fastfetch >/dev/null 2>&1 && [ -r "$ETC_DIR/fastfetch.jsonc" ]; then
+    fastfetch --config "$ETC_DIR/fastfetch.jsonc" 2>/dev/null || true
+  elif command -v neofetch >/dev/null 2>&1; then
+    neofetch --ascii "$ETC_DIR/logo.txt" --config "$ETC_DIR/neofetch.conf" 2>/dev/null || true
+  fi
+}
+
+cmd_backup() {
+  require_root
+  local ts dest; ts="$(date +%Y%m%d-%H%M%S)"; dest="/var/backups/mcrsoft"
+  mkdir -p "$dest"
+  if [ -r "$SECRETS_ENV" ]; then
+    # shellcheck disable=SC1090
+    local db user pass
+    db="$(sed -n 's/^MCR_DB_NAME=//p' "$SECRETS_ENV" | head -n1)"
+    user="$(sed -n 's/^MCR_DB_USER=//p' "$SECRETS_ENV" | head -n1)"
+    pass="$(sed -n 's/^MCR_DB_PASS=//p' "$SECRETS_ENV" | head -n1)"
+    # password via env var consumed by mysqldump, not argv
+    MYSQL_PWD="$pass" mysqldump -u "$user" -h 127.0.0.1 "$db" > "$dest/db-$ts.sql" 2>/dev/null \
+      && ui_info "db dumped to $dest/db-$ts.sql" || ui_warn "db dump failed"
+  fi
+  tar czf "$dest/www-$ts.tar.gz" -C "$APP_ROOT" www 2>/dev/null && ui_info "web root archived" || ui_warn "web archive failed"
+  ui_info "backup complete: $dest"
+}
+
+cmd_restore() {
+  require_root
+  local f="${1:-}"; [ -n "$f" ] || die "usage: mcrctl restore <db-dump.sql>"
+  [ -r "$f" ] || die "no such file: $f"
+  ui_confirm "Restore database from $f? This overwrites current data." || { ui_warn "cancelled"; return 0; }
+  local db user pass
+  db="$(sed -n 's/^MCR_DB_NAME=//p' "$SECRETS_ENV" | head -n1)"
+  user="$(sed -n 's/^MCR_DB_USER=//p' "$SECRETS_ENV" | head -n1)"
+  pass="$(sed -n 's/^MCR_DB_PASS=//p' "$SECRETS_ENV" | head -n1)"
+  MYSQL_PWD="$pass" mysql -u "$user" -h 127.0.0.1 "$db" < "$f" && ui_info "restored" || die "restore failed"
+}
+
+cmd_update() {
+  require_root
+  ui_info "Refreshing packages & MCR app..."
+  if [ -n "${PKG_FAMILY:-}" ]; then
+    sh -c "$(pkg_update_cmd)" >/dev/null 2>&1 || ui_warn "repo refresh failed"
+  fi
+  ui_info "update complete (app bundle updates require a signed bundle)"
+}
+
+cmd_license() {
+  if [ -r "$APP_ROOT/www/wp-content/plugins/mcr-rental-core/license/product.json" ]; then
+    ui_info "License product marker present"
+  else
+    ui_note "No license marker found (dev/unlicensed install)"
+  fi
+}
+
+cmd_enroll() {
+  require_root
+  local url="${1:-}" token="${2:-}"
+  [ -n "$url" ] && [ -n "$token" ] || die "usage: mcrctl enroll <fleet-url> <token>"
+  MCR_FLEET_URL="$url" /usr/local/bin/mcr-agent enroll "$url" "$token"
+  systemctl enable --now mcr-agent.timer >/dev/null 2>&1 \
+    && ui_info "heartbeat timer enabled" || ui_warn "could not enable mcr-agent.timer"
+}
+
+cmd_node() {
+  if [ "$JSON_OUT" = "1" ]; then /usr/local/bin/mcr-agent profile --json; return 0; fi
+  if [ -r "$AGENT_ENV" ]; then
+    ui_box "Node" "node_id : $(sed -n 's/^MCR_NODE_ID=//p' "$AGENT_ENV" | head -n1)" \
+                  "fleet   : $(sed -n 's/^MCR_FLEET_URL=//p' "$AGENT_ENV" | head -n1)" \
+                  "fprint  : $(/usr/local/bin/mcr-agent fingerprint 2>/dev/null)"
+  else
+    ui_warn "not enrolled — run: mcrctl enroll <url> <token>"
+  fi
+}
+
+# ---- branding on|off (self-contained; keeps ID/ID_LIKE/VERSION_ID) ---------
+cmd_branding() {
+  require_root
+  local mode="${1:-}"
+  case "$mode" in
+    on)  branding_on ;;
+    off) branding_off ;;
+    *) die "usage: mcrctl branding on|off" ;;
+  esac
+}
+
+branding_on() {
+  local b="$BRANDING_SRC"
+  [ -d "$b" ] || die "branding source not found at $b"
+  mkdir -p "$ETC_DIR"
+  install -m 0644 "$b/logo.txt" "$ETC_DIR/logo.txt"
+  install -m 0644 "$b/mcrsoft-release" /etc/mcrsoft-release
+  install -m 0644 "$b/fastfetch.jsonc" "$ETC_DIR/fastfetch.jsonc"
+  install -m 0644 "$b/neofetch.conf" "$ETC_DIR/neofetch.conf"
+  install -m 0644 "$b/motd" /etc/motd
+  install -m 0644 "$b/profile.d-mcrsoft.sh" /etc/profile.d/mcrsoft.sh
+  # os-release: back up once, override PRETTY_NAME/NAME, add MCR_*, keep ID/ID_LIKE/VERSION_ID
+  [ -f /etc/os-release.mcr.bak ] || cp /etc/os-release /etc/os-release.mcr.bak
+  local tmp; tmp="$(mktemp)"
+  grep -Ev '^(PRETTY_NAME|NAME|HOME_URL|SUPPORT_URL|LOGO|MCR_[A-Z_]+)=' /etc/os-release.mcr.bak > "$tmp" || true
+  grep -Ev '^\s*#' "$b/os-release.fields" | grep -E '=' >> "$tmp"
+  install -m 0644 "$tmp" /etc/os-release; rm -f "$tmp"
+  # neofetch config for root + skel + existing users
+  local home
+  for home in /root /etc/skel $(awk -F: '($3>=1000)&&($7!~/nologin|false/){print $6}' /etc/passwd 2>/dev/null); do
+    [ -d "$home" ] || continue
+    mkdir -p "$home/.config/neofetch"; cp "$ETC_DIR/neofetch.conf" "$home/.config/neofetch/config.conf"
+  done
+  ui_info "branding ON — neofetch/fastfetch now show 'MCRSOFT BY WOBOO.IO'"
+  ui_note "ID/ID_LIKE/VERSION_ID left intact; original backed up to /etc/os-release.mcr.bak"
+}
+
+branding_off() {
+  if [ -f /etc/os-release.mcr.bak ]; then
+    cp /etc/os-release.mcr.bak /etc/os-release; ui_info "restored original /etc/os-release"
+  else ui_warn "no os-release backup found"; fi
+  rm -f /etc/mcrsoft-release /etc/profile.d/mcrsoft.sh "$ETC_DIR/fastfetch.jsonc" "$ETC_DIR/neofetch.conf" 2>/dev/null || true
+  rm -f /root/.config/neofetch/config.conf 2>/dev/null || true
+  ui_info "branding OFF"
+}
+
+cmd_uninstall() {
+  require_root
+  if [ -x /usr/local/bin/mcr-uninstall ]; then exec /usr/local/bin/mcr-uninstall "$@"; fi
+  ui_warn "uninstall script not installed; run linux/uninstall.sh from the suite"
+}
+
+# ---- dispatch --------------------------------------------------------------
+# global --json flag
+ARGS=()
+for a in "$@"; do case "$a" in --json) JSON_OUT=1 ;; *) ARGS+=("$a") ;; esac; done
+set -- "${ARGS[@]:-}"
+
+case "${1:-}" in
+  status)   cmd_status ;;
+  start)    require_root; svc_each start ;;
+  stop)     require_root; svc_each stop ;;
+  restart)  require_root; svc_each restart ;;
+  backup)   cmd_backup ;;
+  restore)  shift; cmd_restore "$@" ;;
+  update)   cmd_update ;;
+  license)  cmd_license ;;
+  enroll)   shift; cmd_enroll "$@" ;;
+  node)     cmd_node ;;
+  branding) shift; cmd_branding "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  version)  echo "mcrctl $MCRCTL_VERSION" ;;
+  ''|-h|--help)
+    cat <<'EOF'
+mcrctl — MCR Server OS admin CLI
+  status [--json]      services + health + fastfetch
+  start|stop|restart   manage the MCR service stack
+  backup | restore <f> database + web root
+  update               refresh packages / app
+  license              show license marker state
+  enroll <url> <token> register this node with the MCR Fleet
+  node [--json]        show node id + profile
+  branding on|off      apply/remove MCRSOFT branding
+  uninstall            remove MCR Server OS
+  version
+EOF
+    ;;
+  *) die "unknown command: ${1:-} (try: mcrctl --help)" ;;
+esac

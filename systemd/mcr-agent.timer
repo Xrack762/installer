@@ -1,0 +1,14 @@
+[Unit]
+Description=MCR Server OS fleet agent heartbeat timer
+Documentation=https://woboo.io
+
+[Timer]
+# First beat shortly after boot, then roughly every 60s.
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=mcr-agent.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

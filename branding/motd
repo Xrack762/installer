@@ -1,0 +1,9 @@
+
+   MCRSOFT BY WOBOO.IO — managed MCR server
+   --------------------------------------------------------------
+   This host is provisioned and managed by MCR Server OS.
+   Admin CLI:   mcrctl status | start | stop | restart | update
+   Branding:    mcrctl branding on|off
+   Fleet agent: systemctl status mcr-agent.timer
+   Docs:        https://woboo.io
+   --------------------------------------------------------------

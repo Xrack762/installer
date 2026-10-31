@@ -1,0 +1,108 @@
+
+    __  __  ____ ____  ____   ___  _____ _____
+   |  \/  |/ ___|  _ \/ ___| / _ \|  ___|_   _|
+   | |\/| | |   | |_) \___ \| | | | |_    | |
+   | |  | | |___|  _ < ___) | |_| |  _|   | |
+   |_|  |_|\____|_| \_\____/ \___/|_|     |_|
+               B Y   W O B O O . I O
+
+   Universal MCR server provisioning  ·  https://woboo.io
+
+   ! DRY-RUN: no changes will be made. Proving the flow only.
+   +- Target system ----------------------------------------------------------+
+   | Distro     : ubuntu (ubuntu) 22.04 on x86_64                             |
+   | Pkg manager: apt-get (deb)                                               |
+   | Web server : nginx                                                       |
+   | Domain     : test-ubuntu.example.com                                     |
+   | TLS        : certbot                                                     |
+   | Fleet      : <not enrolling>                                             |
+   +--------------------------------------------------------------------------+
+
+   [1/9] * Refresh repositories & install base tools
+      (dry-run sh) apt-get update -y
+      (dry-run sh) apt-get install -y --no-install-recommends unzip curl git ca-certificates openssl rsync tar gzip
+      (dry-run sh) apt-get install -y --no-install-recommends fastfetch
+   [1/9] [OK] Refresh repositories & install base tools (1s)
+   [2/9] * Install web server (nginx)
+      (dry-run sh) apt-get install -y --no-install-recommends nginx
+      (dry-run) systemctl enable --now nginx
+   [2/9] [OK] Install web server (nginx) (1s)
+   [3/9] * Install PHP-FPM (>=8.1) + extensions
+      (dry-run sh) apt-get install -y --no-install-recommends php-fpm php-cli php-mysql php-gd php-curl php-mbstring php-xml php-zip php-intl php-bcmath
+      (dry-run) systemctl enable --now php-fpm
+   [3/9] [OK] Install PHP-FPM (>=8.1) + extensions (1s)
+   [4/9] * Install & initialise MariaDB
+      (dry-run sh) apt-get install -y --no-install-recommends mariadb-server mariadb-client
+      (dry-run) systemctl enable --now mariadb
+   [4/9] [OK] Install & initialise MariaDB (0s)
+   [5/9] * Create database, app user & secrets
+      (dry-run sh) mkdir -p '/etc/mcrsoft'
+      (dry-run sh) mkdir -p '/opt/mcrsoft/www'
+      (dry-run sh) mkdir -p '/opt/mcrsoft/data'
+      (dry-run write) /etc/mcrsoft/secrets.env (chmod 600)
+      (dry-run mysql) create db/user mcr_app (password redacted)
+      No app bundle supplied; web root prepared at /opt/mcrsoft/www
+      (dry-run sh) [ -f '/opt/mcrsoft/www/index.html' ] || printf '%s\n' '<h1>MCRSOFT BY WOBOO.IO</h1><p>Server ready.</p>' > '/opt/mcrsoft/www/index.html'
+      (dry-run sh) id mcrsoft >/dev/null 2>&1 || useradd --system --home '/opt/mcrsoft' --shell /usr/sbin/nologin mcrsoft || true
+      (dry-run sh) chown -R mcrsoft:mcrsoft '/opt/mcrsoft' 2>/dev/null || true
+   [5/9] [OK] Create database, app user & secrets (1s)
+   [6/9] * Apply MCRSOFT branding (os-release, fastfetch, MOTD)
+      (dry-run sh) install -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl
+      (dry-run sh) chmod 0755 /usr/local/bin/mcrctl
+      (dry-run sh) mkdir -p '/usr/local/lib/mcrsoft'
+      (dry-run sh) mkdir -p '/etc/mcrsoft'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/ui.sh' '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true
+      (dry-run sh) cp -r '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding' '/etc/mcrsoft/branding-src' 2>/dev/null || true
+      (dry-run sh) mkdir -p '/etc/mcrsoft'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/logo.txt' '/etc/mcrsoft/logo.txt'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/mcrsoft-release' /etc/mcrsoft-release
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/fastfetch.jsonc' '/etc/mcrsoft/fastfetch.jsonc'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/neofetch.conf' '/etc/mcrsoft/neofetch.conf'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/motd' /etc/motd
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding/profile.d-mcrsoft.sh' /etc/profile.d/mcrsoft.sh && chmod 0644 /etc/profile.d/mcrsoft.sh
+      (dry-run) back up /etc/os-release then set PRETTY_NAME/NAME + MCR_* (keep ID/ID_LIKE/VERSION_ID)
+      (dry-run) install neofetch config for root + /etc/skel + existing users
+      branding on: neofetch/fastfetch now show MCRSOFT BY WOBOO.IO
+   [6/9] [OK] Apply MCRSOFT branding (os-release, fastfetch, MOTD) (2s)
+   [7/9] * Configure firewall & TLS
+      (dry-run sh) apt-get install -y --no-install-recommends ufw
+      (dry-run) systemctl enable --now ufw
+      (dry-run) ufw --force enable
+      (dry-run) ufw allow 22/tcp
+      (dry-run) ufw allow 80/tcp
+      (dry-run) ufw allow 443/tcp
+      (dry-run sh) apt-get install -y --no-install-recommends certbot python3-certbot-nginx
+      (dry-run) certbot --nginx -n --agree-tos -m admin@example.com -d test-ubuntu.example.com
+   [7/9] [OK] Configure firewall & TLS (3s)
+   [8/9] * Install mcrctl, mcr-agent & systemd units
+      (dry-run sh) install -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcrctl' /usr/local/bin/mcrctl
+      (dry-run sh) chmod 0755 /usr/local/bin/mcrctl
+      (dry-run sh) mkdir -p '/usr/local/lib/mcrsoft'
+      (dry-run sh) mkdir -p '/etc/mcrsoft'
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/ui.sh' '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true
+      (dry-run sh) cp -r '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/branding' '/etc/mcrsoft/branding-src' 2>/dev/null || true
+      (dry-run sh) install -m 0755 '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcr-agent' /usr/local/bin/mcr-agent 2>/dev/null || cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/mcr-agent' /usr/local/bin/mcr-agent
+      (dry-run sh) chmod 0755 /usr/local/bin/mcr-agent
+      (dry-run) write /etc/mcrsoft/fleet.pub
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-agent.service' /etc/systemd/system/ 2>/dev/null || true
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-agent.timer' /etc/systemd/system/ 2>/dev/null || true
+      (dry-run sh) cp '/c/Users/XhunterOs/OneDrive/Desktop/woodpress-rental/linux/systemd/mcr-web.service' /etc/systemd/system/ 2>/dev/null || true
+      (dry-run) systemctl daemon-reload
+      (dry-run) systemctl enable --now mcr-agent.timer
+   [8/9] [OK] Install mcrctl, mcr-agent & systemd units (2s)
+   [9/9] * Enroll with MCR Fleet
+      No --fleet-url/--enroll-token; skipping enrollment
+   [9/9] [OK] Enroll with MCR Fleet (0s)
+
+
+   +- Installation complete — MCRSOFT BY WOBOO.IO --------------------------+
+   | Site URL     : https://test-ubuntu.example.com/                          |
+   | Web root     : /opt/mcrsoft/www                                          |
+   | Secrets      : /etc/mcrsoft/secrets.env (chmod 600)                      |
+   | Admin CLI    : mcrctl status                                             |
+   | Branding     : neofetch / fastfetch now show 'MCRSOFT BY WOBOO.IO'       |
+   | Fleet agent  : systemctl status mcr-agent.timer                          |
+   | Install log  : /tmp/tmp.C1vpwveGJG/install.ubuntu.log                    |
+   +--------------------------------------------------------------------------+
+
+      DB credentials are stored only in /etc/mcrsoft/secrets.env (never printed).

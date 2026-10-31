@@ -1,0 +1,20 @@
+Copyright (c) 2026 WOBOO.IO — MCRSOFT. All rights reserved.
+
+This repository contains the installer for MCR Server OS ("the Software").
+
+Permission is granted to download and run this installer to provision and manage
+authorized MCR Server OS instances. A valid MCR licence key is required to use the
+installed software.
+
+You may NOT, without prior written permission from WOBOO.IO:
+  - redistribute, resell, sublicense, or publish this installer or the Software;
+  - remove, alter, or circumvent the licensing, activation, or integrity checks;
+  - use the Software to operate more devices than your licence permits.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Contact: https://woboo.io

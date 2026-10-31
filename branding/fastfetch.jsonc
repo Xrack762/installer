@@ -1,0 +1,29 @@
+// MCR Server OS fastfetch config -> installed to /etc/mcrsoft/fastfetch.jsonc
+// A system wrapper (mcrctl status / MOTD) calls:  fastfetch --config /etc/mcrsoft/fastfetch.jsonc
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "/etc/mcrsoft/logo.txt",
+    "padding": { "top": 1, "left": 2 },
+    "color": { "1": "cyan" }
+  },
+  "display": {
+    "separator": " : "
+  },
+  "modules": [
+    { "type": "title", "format": "MCRSOFT BY WOBOO.IO" },
+    "separator",
+    { "type": "os", "key": "OS", "format": "MCRSOFT BY WOBOO.IO ({2})" },
+    { "type": "host", "key": "Host" },
+    { "type": "kernel", "key": "Kernel" },
+    { "type": "uptime", "key": "Uptime" },
+    { "type": "packages", "key": "Packages" },
+    { "type": "cpu", "key": "CPU" },
+    { "type": "memory", "key": "Memory" },
+    { "type": "disk", "key": "Disk" },
+    { "type": "localip", "key": "Local IP" },
+    "break",
+    { "type": "custom", "format": "Managed by MCR Server OS  ·  https://woboo.io" }
+  ]
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=MCR Server OS fleet agent (heartbeat)
+Documentation=https://woboo.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mcr-agent heartbeat
+# Harden: the agent needs network + read of /etc/mcrsoft + systemctl for commands.
+Nice=10
+# Do not leak secrets into the journal beyond what the agent itself logs.
+ProtectHome=true
+NoNewPrivileges=true
+# Allow controlling services for allow-listed restart-service commands.
+# (Runs as root; command runner is an allow-list, never eval.)
+
+[Install]
+WantedBy=multi-user.target
