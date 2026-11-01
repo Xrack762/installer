@@ -31,7 +31,7 @@ REPLAY_WINDOW=300   # seconds; fleet must also reject heartbeats older than this
 
 # Pinned fleet PUBLIC key (Ed25519, base64 raw 32 bytes). Verify-only.
 # Overridable via env for TESTING ONLY (MCR_FLEET_PUBKEY); production uses file.
-FLEET_PUBKEY_BUILTIN="2Qwd9sntilgvqQ206Pvu4/tgxw1ekUxIev5DWZJ8aeQ="
+FLEET_PUBKEY_BUILTIN="XkOxmTbHwx/EIhgtYHcygLLzXi3wVlF3R3D6U1ZbIRw="
 
 # Allow-list of command types the agent will execute. Nothing else runs.
 ALLOWED_COMMANDS="restart-service backup-now update branding collect-logs set-maintenance reboot"
