@@ -15,14 +15,39 @@ MCR_VERSION="1.0.0"
 # Fleet signing PUBLIC key (Ed25519, base64 raw 32 bytes). Verify-only on nodes.
 MCR_FLEET_PUBKEY_DEFAULT="XkOxmTbHwx/EIhgtYHcygLLzXi3wVlF3R3D6U1ZbIRw="
 
-# ---- locate our own directory (works for local run; one-liner self-fetches) --
+# ---- locate installer/support files -----------------------------------------
 SELF_SRC="${BASH_SOURCE[0]:-$0}"
-SCRIPT_DIR="$(cd "$(dirname "$SELF_SRC")" 2>/dev/null && pwd || echo "")"
+SELF_REAL="$(readlink -f "$SELF_SRC" 2>/dev/null || printf '%s' "$SELF_SRC")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF_REAL")" 2>/dev/null && pwd || printf '')"
+MCR_SUITE_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}"
+LIB_DIR=""
+BRANDING_DIR=""
 
-# When piped from curl there is no script dir with lib/. Allow MCR_SRC_DIR / a
-# download base to be set; the one-liner (get.sh) clones the suite first.
-LIB_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}/lib"
-BRANDING_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}/branding"
+# Support both a complete source checkout and files already installed system-wide.
+# This prevents failures such as "Missing /root/lib/distro.sh" when the libraries
+# were previously installed in /usr/local/lib/mcrsoft.
+resolve_support_files() {
+  local candidate
+  for candidate in "$MCR_SUITE_DIR/lib" "$SCRIPT_DIR/lib" /usr/local/lib/mcrsoft; do
+    if [ -r "$candidate/ui.sh" ] && [ -r "$candidate/distro.sh" ]; then
+      LIB_DIR="$candidate"
+      break
+    fi
+  done
+
+  for candidate in "$MCR_SUITE_DIR/branding" "$SCRIPT_DIR/branding" "$ETC_DIR/branding-src"; do
+    if [ -d "$candidate" ] && [ -r "$candidate/logo.txt" ]; then
+      BRANDING_DIR="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$LIB_DIR" ]; then
+    echo "Cannot find ui.sh and distro.sh. Checked: $MCR_SUITE_DIR/lib, $SCRIPT_DIR/lib, /usr/local/lib/mcrsoft" >&2
+    return 1
+  fi
+  return 0
+}
 
 # ---- defaults / flags --------------------------------------------------------
 OPT_DOMAIN=""
@@ -34,6 +59,16 @@ OPT_ENROLL_TOKEN=""
 OPT_PLAIN=0
 OPT_DRYRUN=0
 OPT_YES=0
+# WordPress / MCR app deployment
+OPT_SITE_URL=""
+OPT_ADMIN_USER=""
+OPT_ADMIN_PASS=""
+OPT_ADMIN_EMAIL=""
+OPT_SITE_TITLE=""
+
+# Set when we generate an admin password (printed once in the summary, never logged).
+GENERATED_ADMIN_USER=""
+GENERATED_ADMIN_PASS=""
 
 LOG_FILE="/var/log/mcrsoft/install.log"
 ETC_DIR="/etc/mcrsoft"
@@ -53,6 +88,11 @@ MCR Server OS installer
   --web nginx|apache  Web server to install (default: nginx)
   --fleet-url <url>   MCR Fleet base URL (…/wp-json) for agent enrollment
   --enroll-token <t>  Fleet enrollment token
+  --site-url <url>    Full site URL (default http://<server-ip>, https://<domain> if --domain)
+  --site-title <t>    WordPress site title (default "MCR")
+  --admin-user <u>    WP admin username (default admin)
+  --admin-pass <p>    WP admin password (default: a strong random one, printed once)
+  --admin-email <e>   WP admin email (default admin@<domain|example.com>)
   --plain             Disable colour/unicode (also honours NO_COLOR / non-tty)
   --dry-run           Mock all package/system mutations; prove the flow, no changes
   --yes               Assume "yes" to prompts (non-interactive)
@@ -74,6 +114,16 @@ parse_args() {
       --fleet-url=*) OPT_FLEET_URL="${1#*=}"; shift ;;
       --enroll-token) OPT_ENROLL_TOKEN="${2:-}"; shift 2 ;;
       --enroll-token=*) OPT_ENROLL_TOKEN="${1#*=}"; shift ;;
+      --site-url) OPT_SITE_URL="${2:-}"; shift 2 ;;
+      --site-url=*) OPT_SITE_URL="${1#*=}"; shift ;;
+      --site-title) OPT_SITE_TITLE="${2:-}"; shift 2 ;;
+      --site-title=*) OPT_SITE_TITLE="${1#*=}"; shift ;;
+      --admin-user) OPT_ADMIN_USER="${2:-}"; shift 2 ;;
+      --admin-user=*) OPT_ADMIN_USER="${1#*=}"; shift ;;
+      --admin-pass) OPT_ADMIN_PASS="${2:-}"; shift 2 ;;
+      --admin-pass=*) OPT_ADMIN_PASS="${1#*=}"; shift ;;
+      --admin-email) OPT_ADMIN_EMAIL="${2:-}"; shift 2 ;;
+      --admin-email=*) OPT_ADMIN_EMAIL="${1#*=}"; shift ;;
       --plain) OPT_PLAIN=1; shift ;;
       --dry-run) OPT_DRYRUN=1; shift ;;
       --yes|-y) OPT_YES=1; shift ;;
@@ -151,6 +201,7 @@ main() {
   [ "$OPT_PLAIN" = "1" ] && export MCR_PLAIN=1
   [ "$OPT_YES" = "1" ] && export MCR_ASSUME_YES=1
 
+  resolve_support_files || exit 1
   # shellcheck source=lib/ui.sh
   [ -r "$LIB_DIR/ui.sh" ] || { echo "Missing $LIB_DIR/ui.sh" >&2; exit 1; }
   # shellcheck source=lib/distro.sh
@@ -162,7 +213,11 @@ main() {
   ui_log_init "${MCR_LOG_FILE:-$LOG_FILE}"
   _logline "===== MCR Server OS installer v$MCR_VERSION start (dry-run=$OPT_DRYRUN) ====="
 
-  ui_banner "$BRANDING_DIR/logo.txt"
+  if [ -n "$BRANDING_DIR" ] && [ -r "$BRANDING_DIR/logo.txt" ]; then
+    ui_banner "$BRANDING_DIR/logo.txt"
+  else
+    ui_note "Branding logo not found; continuing without the banner"
+  fi
   [ "$OPT_DRYRUN" = "1" ] && ui_warn "DRY-RUN: no changes will be made. Proving the flow only."
 
   require_root
@@ -188,7 +243,7 @@ main() {
     ui_warn "Aborted by user."; exit 0
   fi
 
-  ui_steps_total 9
+  ui_steps_total 11
 
   # ---- 1. base repos + tools ------------------------------------------------
   ui_step_begin "Refresh repositories & install base tools"
@@ -215,7 +270,17 @@ main() {
   do_app_and_secrets || { ui_step_end 1; die "app provisioning failed"; }
   ui_step_end 0
 
-  # ---- 6. branding ----------------------------------------------------------
+  # ---- 6. WordPress + MCR app ----------------------------------------------
+  ui_step_begin "Deploy WordPress + MCR app"
+  do_deploy_wordpress || { ui_step_end 1; die "WordPress/app deployment failed"; }
+  ui_step_end 0
+
+  # ---- 7. web server vhost --------------------------------------------------
+  ui_step_begin "Configure web server (vhost)"
+  do_vhost || { ui_step_end 1; die "web server vhost configuration failed"; }
+  ui_step_end 0
+
+  # ---- 8. branding ----------------------------------------------------------
   ui_step_begin "Apply MCRSOFT branding (os-release, fastfetch, MOTD)"
   do_branding || { ui_step_end 1; die "branding failed"; }
   ui_step_end 0
@@ -237,16 +302,23 @@ main() {
   echo
 
   # ---- summary --------------------------------------------------------------
-  local url_host="${OPT_DOMAIN:-$(primary_ip)}"
-  local scheme="http"; { [ -n "$OPT_DOMAIN" ] && [ "$OPT_NO_TLS" != 1 ]; } && scheme="https"
+  local site; site="$(site_url)"
   ui_summary "Installation complete — MCRSOFT BY WOBOO.IO" \
-    "Site URL     : $scheme://$url_host/" \
+    "Site URL     : $site" \
+    "WP admin     : ${site%/}/wp-admin/" \
     "Web root     : $WWW_DIR" \
     "Secrets      : $SECRETS_ENV (chmod 600)" \
     "Admin CLI    : mcrctl status" \
     "Branding     : neofetch / fastfetch now show 'MCRSOFT BY WOBOO.IO'" \
     "Fleet agent  : systemctl status mcr-agent.timer" \
     "Install log  : ${MCR_LOG_FILE:-$LOG_FILE}"
+  if [ -n "$GENERATED_ADMIN_PASS" ]; then
+    ui_box "WordPress admin login (shown ONCE — save it now)" \
+      "URL      : ${site%/}/wp-admin/" \
+      "Username : $GENERATED_ADMIN_USER" \
+      "Password : $GENERATED_ADMIN_PASS"
+    ui_note "This password was generated and is NOT written to the install log. Store it securely."
+  fi
   ui_note "DB credentials are stored only in $SECRETS_ENV (never printed)."
   _logline "===== installer finished ok ====="
   return 0
@@ -332,31 +404,224 @@ EOF
     fi
   fi
 
-  # Deploy app bundle if provided (sha256-verified), else leave web root ready.
-  if [ -n "${MCR_APP_BUNDLE:-}" ]; then
-    deploy_bundle "$MCR_APP_BUNDLE" "${MCR_APP_BUNDLE_SHA256:-}" || return 1
-  else
-    ui_note "No app bundle supplied; web root prepared at $WWW_DIR"
-    run_sh "[ -f '$WWW_DIR/index.html' ] || printf '%s\n' '<h1>MCRSOFT BY WOBOO.IO</h1><p>Server ready.</p>' > '$WWW_DIR/index.html'"
-  fi
-  # Ownership
+  # Ensure the app/service user exists. The WordPress deploy step (next) lays
+  # down WP + the MCR plugin/theme and sets final ownership.
   run_sh "id mcrsoft >/dev/null 2>&1 || useradd --system --home '$APP_ROOT' --shell /usr/sbin/nologin mcrsoft || true"
-  run_sh "chown -R mcrsoft:mcrsoft '$APP_ROOT' 2>/dev/null || true"
 }
 
-# deploy_bundle <path-or-url> <sha256>
+# =============================================================================
+#  WordPress + MCR app deployment
+# =============================================================================
+# site_url : the canonical site URL. --site-url wins; else https://<domain>
+# (unless --no-tls) ; else http://<primary-ip>.
+site_url() {
+  if [ -n "$OPT_SITE_URL" ]; then printf '%s' "$OPT_SITE_URL"; return 0; fi
+  if [ -n "$OPT_DOMAIN" ]; then
+    if [ "$OPT_NO_TLS" != "1" ]; then printf 'https://%s' "$OPT_DOMAIN"; else printf 'http://%s' "$OPT_DOMAIN"; fi
+    return 0
+  fi
+  printf 'http://%s' "$(primary_ip)"
+}
+
+# wp_cmd : wp-cli invocation for our web root, allow-root (we run as root then chown).
+WP() { run wp --path="$WWW_DIR" "$@" --allow-root; }
+
+# wp_done <cmd...> : true if an idempotency check passes. In --dry-run it always
+# returns false so the full deploy flow is exercised/printed.
+wp_done() {
+  [ "$OPT_DRYRUN" = "1" ] && return 1
+  "$@" >/dev/null 2>&1
+}
+
+# resolve_bundle : echo the app bundle path/URL to use, or empty.
+resolve_bundle() {
+  local b="${MCR_APP_BUNDLE:-}"
+  if [ -z "$b" ]; then
+    local src="${MCR_SRC_DIR:-$SCRIPT_DIR}" cand
+    for cand in "$src/mcr-app.tar.gz" "$src/../mcr-app.tar.gz" "./mcr-app.tar.gz"; do
+      [ -f "$cand" ] && { b="$cand"; break; }
+    done
+  fi
+  printf '%s' "$b"
+}
+
+do_deploy_wordpress() {
+  local bundle; bundle="$(resolve_bundle)"
+  local site; site="$(site_url)"
+
+  ensure_wp_cli || { ui_warn "could not install wp-cli; skipping WordPress deploy"; return 0; }
+
+  # 1. WordPress core files
+  if wp_done test -f "$WWW_DIR/wp-load.php"; then
+    ui_note "WordPress core already present; skipping download"
+  else
+    WP core download --locale=fr_FR || WP core download || { ui_error "wp core download failed"; return 1; }
+  fi
+
+  # 2. wp-config.php from secrets.env (DB creds + salts never logged/printed)
+  write_wp_config "$site" || return 1
+
+  # 3. MCR plugin + theme from the bundle
+  if [ -n "$bundle" ]; then
+    deploy_bundle "$bundle" "${MCR_APP_BUNDLE_SHA256:-}" || return 1
+    # safety net: if the plugin vendor/ is missing, build it
+    if [ "$OPT_DRYRUN" != "1" ] && [ ! -f "$WWW_DIR/wp-content/plugins/mcr-rental-core/vendor/autoload.php" ]; then
+      ui_warn "plugin vendor/ missing from bundle; running composer install (safety net)"
+      ensure_composer && run_sh "cd '$WWW_DIR/wp-content/plugins/mcr-rental-core' && composer install --no-dev --prefer-dist --no-interaction" \
+        || ui_warn "composer fallback failed; mPDF/PDF export may not work"
+    fi
+  else
+    ui_warn "No app bundle (MCR_APP_BUNDLE / ./mcr-app.tar.gz); installing vanilla WordPress only"
+  fi
+
+  # 4. Install WordPress (admin password never logged)
+  do_wp_install "$site" || { ui_error "wp core install failed"; return 1; }
+
+  # 5. Activate + configure (tolerant: warn and continue on any sub-step)
+  local title="${OPT_SITE_TITLE:-MCR}"
+  if [ -n "$bundle" ]; then
+    WP theme activate mcr-premium || ui_warn "could not activate theme mcr-premium"
+    WP plugin activate mcr-rental-core || ui_warn "could not activate plugin mcr-rental-core"
+  fi
+  WP rewrite structure '/%postname%/' --hard || ui_warn "could not set permalinks"
+  WP rewrite flush --hard || ui_warn "could not flush rewrite rules"
+  WP option update timezone_string 'Africa/Casablanca' || ui_warn "could not set timezone"
+  WP language core install fr_FR || ui_note "fr_FR language may already be installed"
+  WP site switch-language fr_FR || ui_warn "could not switch site language to fr_FR"
+  WP option update blogname "$title" || ui_warn "could not set site title"
+  # MCR pages/menus (command provided by the plugin's includes/class-cli.php)
+  if [ -n "$bundle" ]; then
+    WP mcr setup-pages || ui_warn "wp mcr setup-pages failed (run manually later)"
+  fi
+
+  # 6. Ownership: php-fpm user owns the tree (WP writes uploads; web server
+  # reads static files via o+rx). MCR_PRIVATE_DIR lives outside the web root.
+  local wu; wu="$(web_runtime_user "$OPT_WEB")"
+  mkdir_p_run "$DATA_DIR/private"
+  run_sh "chown -R '$wu':'$wu' '$WWW_DIR' 2>/dev/null || true"
+  run_sh "chown -R '$wu':'$wu' '$DATA_DIR/private' 2>/dev/null || true"
+  run_sh "chmod 2775 '$WWW_DIR' 2>/dev/null || true"
+  ui_note "web root owned by '$wu' (php-fpm user); private dir at $DATA_DIR/private"
+  return 0
+}
+
+ensure_wp_cli() {
+  if wp_done command -v wp; then ui_note "wp-cli already installed"; return 0; fi
+  run_sh "curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp"
+  run_sh "chmod 0755 /usr/local/bin/wp"
+}
+
+ensure_composer() {
+  if wp_done command -v composer; then return 0; fi
+  run_sh "curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php && php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm -f /tmp/composer-setup.php"
+}
+
+# write_wp_config <site-url> : generate wp-config.php from secrets.env.
+# DB credentials and salts are NEVER echoed to stdout or the install log.
+write_wp_config() {
+  local site="$1" cfg="$WWW_DIR/wp-config.php"
+  if [ "$OPT_DRYRUN" = "1" ]; then
+    printf '      %s write %s from %s (DB creds + salts redacted; WP_HOME/WP_SITEURL=%s; MCR_PRIVATE_DIR=%s)\n' \
+      "$(_c "$C_GREY" "(dry-run)")" "$cfg" "$SECRETS_ENV" "$site" "$DATA_DIR/private"
+    _logline "WRITE wp-config.php from secrets.env [db creds + salts redacted]"
+    return 0
+  fi
+  [ -r "$SECRETS_ENV" ] || { ui_error "secrets.env missing; cannot write wp-config.php"; return 1; }
+  # shellcheck disable=SC1090
+  . "$SECRETS_ENV"
+  local k_auth k_sauth k_login k_nonce s_auth s_sauth s_login s_nonce
+  k_auth="$(rand_secret 64)";  k_sauth="$(rand_secret 64)"
+  k_login="$(rand_secret 64)"; k_nonce="$(rand_secret 64)"
+  s_auth="$(rand_secret 64)";  s_sauth="$(rand_secret 64)"
+  s_login="$(rand_secret 64)"; s_nonce="$(rand_secret 64)"
+  ( umask 027
+    cat > "$cfg" <<PHP
+<?php
+/* MCR Server OS — generated wp-config.php. DB creds come from $SECRETS_ENV. */
+define( 'DB_NAME', '${MCR_DB_NAME}' );
+define( 'DB_USER', '${MCR_DB_USER}' );
+define( 'DB_PASSWORD', '${MCR_DB_PASS}' );
+define( 'DB_HOST', '${MCR_DB_HOST:-127.0.0.1}' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+
+define( 'AUTH_KEY',         '${k_auth}' );
+define( 'SECURE_AUTH_KEY',  '${k_sauth}' );
+define( 'LOGGED_IN_KEY',    '${k_login}' );
+define( 'NONCE_KEY',        '${k_nonce}' );
+define( 'AUTH_SALT',        '${s_auth}' );
+define( 'SECURE_AUTH_SALT', '${s_sauth}' );
+define( 'LOGGED_IN_SALT',   '${s_login}' );
+define( 'NONCE_SALT',       '${s_nonce}' );
+
+\$table_prefix = 'wp_';
+
+define( 'WP_HOME', '${site}' );
+define( 'WP_SITEURL', '${site}' );
+
+/* MCR: private documents live OUTSIDE the web root. Standalone web mode:
+   MCR_APP is intentionally NOT defined, so the plugin licence gate runs
+   unlocked (not enforcing) for this deployment. */
+define( 'MCR_PRIVATE_DIR', '${DATA_DIR}/private' );
+
+define( 'WP_DEBUG', false );
+define( 'FS_METHOD', 'direct' );
+
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+PHP
+  )
+  chmod 0640 "$cfg"
+  _logline "WRITE wp-config.php (DB creds + salts redacted)"
+  ui_note "wrote wp-config.php (DB creds from secrets.env; salts generated; both redacted)"
+}
+
+# do_wp_install <site-url> : wp core install. Admin password is never logged.
+do_wp_install() {
+  local site="$1"
+  if wp_done wp --path="$WWW_DIR" core is-installed --allow-root; then
+    ui_note "WordPress already installed; skipping core install"
+    return 0
+  fi
+  local title="${OPT_SITE_TITLE:-MCR}"
+  local user="${OPT_ADMIN_USER:-admin}"
+  local email="${OPT_ADMIN_EMAIL:-admin@${OPT_DOMAIN:-example.com}}"
+  local pass="$OPT_ADMIN_PASS"
+  if [ -z "$pass" ]; then
+    pass="$(rand_secret 20)"
+    GENERATED_ADMIN_USER="$user"
+    GENERATED_ADMIN_PASS="$pass"
+  fi
+  if [ "$OPT_DRYRUN" = "1" ]; then
+    printf '      %s wp core install --url=%s --title=%s --admin_user=%s --admin_password=<redacted> --admin_email=%s\n' \
+      "$(_c "$C_GREY" "(dry-run wp)")" "$site" "$title" "$user" "$email"
+    _logline "RUN wp core install --url=$site (admin_password redacted)"
+    return 0
+  fi
+  _logline "RUN wp core install --url=$site (admin_password redacted)"
+  wp --path="$WWW_DIR" core install \
+    --url="$site" --title="$title" \
+    --admin_user="$user" --admin_password="$pass" --admin_email="$email" \
+    --skip-email --allow-root
+}
+
+# deploy_bundle <path-or-url> <sha256> : unpack the MCR plugin+theme bundle into
+# wp-content. Supports .tar.gz (preferred) and .zip. sha256-verified when given.
 deploy_bundle() {
-  local src="$1" want="$2" tmp="/tmp/mcr-bundle.$$"
+  local src="$1" want="$2" tmp="/tmp/mcr-bundle.$$" ext="tar.gz"
+  case "$src" in *.zip) ext="zip" ;; esac
   mkdir_p_run "$tmp"
   case "$src" in
-    http://*|https://*) run_sh "curl -fsSL '$src' -o '$tmp/bundle.zip'" ;;
-    *) run_sh "cp '$src' '$tmp/bundle.zip'" ;;
+    http://*|https://*) run_sh "curl -fsSL '$src' -o '$tmp/bundle.$ext'" ;;
+    *) run_sh "cp '$src' '$tmp/bundle.$ext'" ;;
   esac
   if [ -n "$want" ]; then
     if [ "$OPT_DRYRUN" = "1" ]; then
       ui_note "(dry-run) would verify sha256=$want"
     else
-      local got; got="$(sha256sum "$tmp/bundle.zip" | awk '{print $1}')"
+      local got; got="$(sha256sum "$tmp/bundle.$ext" | awk '{print $1}')"
       if [ "$got" != "$want" ]; then
         ui_error "Bundle sha256 mismatch (want $want got $got)"; return 1
       fi
@@ -365,13 +630,169 @@ deploy_bundle() {
   else
     ui_warn "No sha256 given for bundle; cannot verify integrity"
   fi
-  run_sh "unzip -oq '$tmp/bundle.zip' -d '$WWW_DIR'"
+  mkdir_p_run "$WWW_DIR/wp-content/plugins" "$WWW_DIR/wp-content/themes" "$tmp/x"
+  if [ "$ext" = "zip" ]; then
+    run_sh "unzip -oq '$tmp/bundle.$ext' -d '$tmp/x'"
+  else
+    run_sh "tar -xzf '$tmp/bundle.$ext' -C '$tmp/x'"
+  fi
+  # Bundle layout: plugins/<slug>/..., themes/<slug>/...
+  run_sh "cp -a '$tmp/x/plugins/.' '$WWW_DIR/wp-content/plugins/' 2>/dev/null || true"
+  run_sh "cp -a '$tmp/x/themes/.'  '$WWW_DIR/wp-content/themes/'  2>/dev/null || true"
   run_sh "rm -rf '$tmp'"
+  ui_note "deployed MCR plugin + theme into wp-content"
+}
+
+# =============================================================================
+#  Web server vhost (serves WordPress + PHP via php-fpm)
+# =============================================================================
+# install_vhost_file <path> <content> : write a vhost. In --dry-run it prints
+# the full rendered config (so tests can grep directives + the fastcgi target).
+install_vhost_file() {
+  local path="$1" content="$2"
+  if [ "$OPT_DRYRUN" = "1" ]; then
+    printf '      %s vhost -> %s\n' "$(_c "$C_GREY" "(dry-run)")" "$path"
+    printf '%s\n' "$content" | sed 's/^/        | /'
+    _logline "WRITE vhost $path"
+    return 0
+  fi
+  mkdir -p "$(dirname "$path")"
+  printf '%s\n' "$content" > "$path"
+  chmod 0644 "$path"
+}
+
+do_vhost() {
+  local server_name="${OPT_DOMAIN:-$(primary_ip)}"
+  if [ "$OPT_WEB" = "apache" ]; then
+    vhost_apache "$server_name"
+  else
+    vhost_nginx "$server_name"
+  fi
+}
+
+vhost_nginx() {
+  local server_name="$1" listen conf content
+  listen="$(php_fpm_listen)"
+  content="$(cat <<EOF
+# MCR Server OS — WordPress vhost (nginx + php-fpm)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $server_name;
+    root $WWW_DIR;
+    index index.php index.html;
+
+    client_max_body_size 64m;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php\$ {
+        include fastcgi_params;
+        fastcgi_pass $listen;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+
+    location = /favicon.ico { log_not_found off; access_log off; }
+    location = /robots.txt  { log_not_found off; access_log off; allow all; }
+    location ~* /\.(?!well-known).* { deny all; }
+    location ~* /wp-content/.*\.php\$ { deny all; }
+}
+EOF
+)"
+  case "$PKG_FAMILY" in
+    deb)
+      conf="/etc/nginx/sites-available/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      run_sh "ln -sf '$conf' /etc/nginx/sites-enabled/mcrsoft.conf"
+      run_sh "rm -f /etc/nginx/sites-enabled/default"
+      ;;
+    *)
+      conf="/etc/nginx/conf.d/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      # neutralise the distro default server block if present
+      run_sh "[ -f /etc/nginx/conf.d/default.conf ] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled || true"
+      ;;
+  esac
+  ui_note "nginx vhost written to $conf (fastcgi_pass $listen)"
+  run nginx -t || ui_warn "nginx -t reported a problem; review $conf"
+  run systemctl reload "$(svc_name web-nginx)" || run systemctl restart "$(svc_name web-nginx)" || ui_note "reload nginx manually"
+}
+
+vhost_apache() {
+  local server_name="$1" listen conf content proxy
+  listen="$(php_fpm_listen)"
+  # Apache proxies .php to php-fpm (SetHandler). For unix sockets use the
+  # unix:/path|fcgi://localhost form; for host:port use fcgi://host:port.
+  case "$listen" in
+    unix:*) proxy="unix:${listen#unix:}|fcgi://localhost" ;;
+    *)      proxy="fcgi://$listen" ;;
+  esac
+  content="$(cat <<EOF
+# MCR Server OS — WordPress vhost (apache + php-fpm via mod_proxy_fcgi)
+<VirtualHost *:80>
+    ServerName $server_name
+    DocumentRoot $WWW_DIR
+    DirectoryIndex index.php index.html
+
+    <Directory $WWW_DIR>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    <FilesMatch \.php\$>
+        SetHandler "proxy:$proxy"
+    </FilesMatch>
+
+    <FilesMatch "^\.ht">
+        Require all denied
+    </FilesMatch>
+</VirtualHost>
+EOF
+)"
+  case "$PKG_FAMILY" in
+    deb)
+      conf="/etc/apache2/sites-available/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      run_sh "a2enmod proxy proxy_fcgi rewrite >/dev/null 2>&1 || true"
+      run_sh "a2ensite mcrsoft >/dev/null 2>&1 || ln -sf '$conf' /etc/apache2/sites-enabled/mcrsoft.conf"
+      run_sh "a2dissite 000-default >/dev/null 2>&1 || rm -f /etc/apache2/sites-enabled/000-default.conf"
+      ;;
+    suse)
+      conf="/etc/apache2/vhosts.d/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      ;;
+    arch)
+      conf="/etc/httpd/conf/extra/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      run_sh "grep -q 'extra/mcrsoft.conf' /etc/httpd/conf/httpd.conf 2>/dev/null || printf '\nInclude conf/extra/mcrsoft.conf\n' >> /etc/httpd/conf/httpd.conf"
+      ;;
+    *)
+      conf="/etc/httpd/conf.d/mcrsoft.conf"
+      install_vhost_file "$conf" "$content"
+      ;;
+  esac
+  ui_note "apache vhost written to $conf (php-fpm $listen)"
+  run "$(svc_name web-apache)" -t 2>/dev/null || run apachectl configtest || ui_warn "apache config test reported a problem; review $conf"
+  run systemctl reload "$(svc_name web-apache)" || run systemctl restart "$(svc_name web-apache)" || ui_note "reload apache manually"
 }
 
 do_branding() {
-  install_mcrctl_now  # ensure mcrctl present so we can call branding on
-  # Perform branding directly (same logic mcrctl uses).
+  local required
+  install_mcrctl_now
+  if [ -z "$BRANDING_DIR" ]; then
+    ui_warn "Branding assets were not found; skipping branding instead of aborting installation"
+    return 0
+  fi
+  for required in logo.txt mcrsoft-release fastfetch.jsonc neofetch.conf motd profile.d-mcrsoft.sh os-release.fields; do
+    if [ ! -r "$BRANDING_DIR/$required" ]; then
+      ui_warn "Branding asset $required is missing; skipping branding"
+      return 0
+    fi
+  done
   branding_apply on
 }
 
@@ -414,33 +835,50 @@ do_firewall_tls() {
 }
 
 do_install_tooling() {
-  local src="${MCR_SRC_DIR:-$SCRIPT_DIR}"
+  local src="$MCR_SUITE_DIR"
   install_mcrctl_now
-  # mcr-agent
-  run_sh "install -m 0755 '$src/mcr-agent' /usr/local/bin/mcr-agent 2>/dev/null || cp '$src/mcr-agent' /usr/local/bin/mcr-agent"
-  run_sh "chmod 0755 /usr/local/bin/mcr-agent"
-  # embed pinned fleet pubkey for the agent
+
+  # Keep an already-installed agent if this is a partial installer directory.
+  if [ -r "$src/mcr-agent" ]; then
+    run_sh "install -m 0755 '$src/mcr-agent' /usr/local/bin/mcr-agent"
+  elif [ ! -x /usr/local/bin/mcr-agent ] && [ "$OPT_DRYRUN" != "1" ]; then
+    ui_warn "mcr-agent source and installed binary are both missing; skipping agent install"
+  fi
+
   write_regular_file "$ETC_DIR/fleet.pub" "$MCR_FLEET_PUBKEY_DEFAULT"
-  # systemd units
+
   if [ -d "$src/systemd" ]; then
-    run_sh "cp '$src/systemd/mcr-agent.service' /etc/systemd/system/ 2>/dev/null || true"
-    run_sh "cp '$src/systemd/mcr-agent.timer' /etc/systemd/system/ 2>/dev/null || true"
-    run_sh "cp '$src/systemd/mcr-web.service' /etc/systemd/system/ 2>/dev/null || true"
+    [ ! -r "$src/systemd/mcr-agent.service" ] || run_sh "install -m 0644 '$src/systemd/mcr-agent.service' /etc/systemd/system/mcr-agent.service"
+    [ ! -r "$src/systemd/mcr-agent.timer" ] || run_sh "install -m 0644 '$src/systemd/mcr-agent.timer' /etc/systemd/system/mcr-agent.timer"
+    [ ! -r "$src/systemd/mcr-web.service" ] || run_sh "install -m 0644 '$src/systemd/mcr-web.service' /etc/systemd/system/mcr-web.service"
     run systemctl daemon-reload || true
-    run systemctl enable --now mcr-agent.timer || ui_note "enable mcr-agent.timer later (needs enrollment)"
+    if [ -r "$src/systemd/mcr-agent.timer" ]; then
+      run systemctl enable --now mcr-agent.timer || ui_note "enable mcr-agent.timer later (needs enrollment)"
+    fi
+  else
+    ui_note "No systemd unit directory in source; keeping any existing units"
   fi
   return 0
 }
 
 install_mcrctl_now() {
-  local src="${MCR_SRC_DIR:-$SCRIPT_DIR}"
-  [ -x /usr/local/bin/mcrctl ] && return 0
-  run_sh "install -m 0755 '$src/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '$src/mcrctl' /usr/local/bin/mcrctl"
-  run_sh "chmod 0755 /usr/local/bin/mcrctl"
-  # make libs + branding available system-wide for mcrctl/agent
+  local src="$MCR_SUITE_DIR"
+  if [ ! -x /usr/local/bin/mcrctl ]; then
+    if [ -r "$src/mcrctl" ]; then
+      run_sh "install -m 0755 '$src/mcrctl' /usr/local/bin/mcrctl"
+    elif [ "$OPT_DRYRUN" != "1" ]; then
+      ui_warn "mcrctl source is missing and /usr/local/bin/mcrctl is not installed"
+    fi
+  fi
+
+  # Make the selected libraries and branding available to system tools.
   mkdir_p_run /usr/local/lib/mcrsoft "$ETC_DIR"
-  run_sh "cp '$src/lib/ui.sh' '$src/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true"
-  run_sh "cp -r '$src/branding' '$ETC_DIR/branding-src' 2>/dev/null || true"
+  if [ -n "$LIB_DIR" ]; then
+    run_sh "install -m 0644 '$LIB_DIR/ui.sh' '$LIB_DIR/distro.sh' /usr/local/lib/mcrsoft/"
+  fi
+  if [ -n "$BRANDING_DIR" ] && [ -d "$BRANDING_DIR" ]; then
+    run_sh "mkdir -p '$ETC_DIR/branding-src' && cp -a '$BRANDING_DIR/.' '$ETC_DIR/branding-src/'"
+  fi
 }
 
 do_enroll() {
