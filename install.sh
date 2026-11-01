@@ -15,39 +15,14 @@ MCR_VERSION="1.0.0"
 # Fleet signing PUBLIC key (Ed25519, base64 raw 32 bytes). Verify-only on nodes.
 MCR_FLEET_PUBKEY_DEFAULT="XkOxmTbHwx/EIhgtYHcygLLzXi3wVlF3R3D6U1ZbIRw="
 
-# ---- locate installer/support files -----------------------------------------
+# ---- locate our own directory (works for local run; one-liner self-fetches) --
 SELF_SRC="${BASH_SOURCE[0]:-$0}"
-SELF_REAL="$(readlink -f "$SELF_SRC" 2>/dev/null || printf '%s' "$SELF_SRC")"
-SCRIPT_DIR="$(cd "$(dirname "$SELF_REAL")" 2>/dev/null && pwd || printf '')"
-MCR_SUITE_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}"
-LIB_DIR=""
-BRANDING_DIR=""
+SCRIPT_DIR="$(cd "$(dirname "$SELF_SRC")" 2>/dev/null && pwd || echo "")"
 
-# Support both a complete source checkout and files already installed system-wide.
-# This prevents failures such as "Missing /root/lib/distro.sh" when the libraries
-# were previously installed in /usr/local/lib/mcrsoft.
-resolve_support_files() {
-  local candidate
-  for candidate in "$MCR_SUITE_DIR/lib" "$SCRIPT_DIR/lib" /usr/local/lib/mcrsoft; do
-    if [ -r "$candidate/ui.sh" ] && [ -r "$candidate/distro.sh" ]; then
-      LIB_DIR="$candidate"
-      break
-    fi
-  done
-
-  for candidate in "$MCR_SUITE_DIR/branding" "$SCRIPT_DIR/branding" "$ETC_DIR/branding-src"; do
-    if [ -d "$candidate" ] && [ -r "$candidate/logo.txt" ]; then
-      BRANDING_DIR="$candidate"
-      break
-    fi
-  done
-
-  if [ -z "$LIB_DIR" ]; then
-    echo "Cannot find ui.sh and distro.sh. Checked: $MCR_SUITE_DIR/lib, $SCRIPT_DIR/lib, /usr/local/lib/mcrsoft" >&2
-    return 1
-  fi
-  return 0
-}
+# When piped from curl there is no script dir with lib/. Allow MCR_SRC_DIR / a
+# download base to be set; the one-liner (get.sh) clones the suite first.
+LIB_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}/lib"
+BRANDING_DIR="${MCR_SRC_DIR:-$SCRIPT_DIR}/branding"
 
 # ---- defaults / flags --------------------------------------------------------
 OPT_DOMAIN=""
@@ -201,11 +176,38 @@ main() {
   [ "$OPT_PLAIN" = "1" ] && export MCR_PLAIN=1
   [ "$OPT_YES" = "1" ] && export MCR_ASSUME_YES=1
 
-  resolve_support_files || exit 1
+  # Resolve shared files from either the checkout, installer subdirectory,
+  # or the system-wide location used by earlier MCR installs.
+  local candidate
+  if [ ! -r "$LIB_DIR/ui.sh" ] || [ ! -r "$LIB_DIR/distro.sh" ]; then
+    for candidate in \
+      "${MCR_SRC_DIR:-}/lib" \
+      "$SCRIPT_DIR/lib" \
+      "$SCRIPT_DIR/../lib" \
+      "/usr/local/lib/mcrsoft"; do
+      if [ -r "$candidate/ui.sh" ] && [ -r "$candidate/distro.sh" ]; then
+        LIB_DIR="$(cd "$candidate" 2>/dev/null && pwd)"
+        break
+      fi
+    done
+  fi
+  if [ ! -r "$BRANDING_DIR/logo.txt" ]; then
+    for candidate in \
+      "${MCR_SRC_DIR:-}/branding" \
+      "$SCRIPT_DIR/branding" \
+      "$SCRIPT_DIR/../branding" \
+      "$ETC_DIR/branding-src"; do
+      if [ -r "$candidate/logo.txt" ]; then
+        BRANDING_DIR="$(cd "$candidate" 2>/dev/null && pwd)"
+        break
+      fi
+    done
+  fi
+
   # shellcheck source=lib/ui.sh
-  [ -r "$LIB_DIR/ui.sh" ] || { echo "Missing $LIB_DIR/ui.sh" >&2; exit 1; }
+  [ -r "$LIB_DIR/ui.sh" ] || { echo "Missing $LIB_DIR/ui.sh (searched suite/lib, script/lib, ../lib, /usr/local/lib/mcrsoft)" >&2; exit 1; }
   # shellcheck source=lib/distro.sh
-  [ -r "$LIB_DIR/distro.sh" ] || { echo "Missing $LIB_DIR/distro.sh" >&2; exit 1; }
+  [ -r "$LIB_DIR/distro.sh" ] || { echo "Missing $LIB_DIR/distro.sh (searched suite/lib, script/lib, ../lib, /usr/local/lib/mcrsoft)" >&2; exit 1; }
   . "$LIB_DIR/ui.sh"
   . "$LIB_DIR/distro.sh"
 
@@ -213,7 +215,7 @@ main() {
   ui_log_init "${MCR_LOG_FILE:-$LOG_FILE}"
   _logline "===== MCR Server OS installer v$MCR_VERSION start (dry-run=$OPT_DRYRUN) ====="
 
-  if [ -n "$BRANDING_DIR" ] && [ -r "$BRANDING_DIR/logo.txt" ]; then
+  if [ -r "$BRANDING_DIR/logo.txt" ]; then
     ui_banner "$BRANDING_DIR/logo.txt"
   else
     ui_note "Branding logo not found; continuing without the banner"
@@ -358,7 +360,18 @@ do_webserver() {
 
 do_php() {
   pm_install "$(pkg_names php)"
-  run systemctl enable --now "$(svc_name phpfpm)" || ui_note "php-fpm unit name varies; verify with 'systemctl'"
+  local service
+  service="$(php_fpm_service)" || {
+    ui_error "PHP-FPM package installed but no systemd FPM unit was found"
+    systemctl list-unit-files --type=service 2>/dev/null | grep -i php >&2 || true
+    return 1
+  }
+  run systemctl enable --now "$service"
+  php_fpm_listen >/dev/null || {
+    ui_error "PHP-FPM service '$service' is enabled but no FPM listen socket/config was found"
+    return 1
+  }
+  ui_note "PHP-FPM service: $service; socket: $(php_fpm_listen)"
 }
 
 do_mariadb() {
@@ -417,7 +430,11 @@ EOF
 site_url() {
   if [ -n "$OPT_SITE_URL" ]; then printf '%s' "$OPT_SITE_URL"; return 0; fi
   if [ -n "$OPT_DOMAIN" ]; then
-    if [ "$OPT_NO_TLS" != "1" ]; then printf 'https://%s' "$OPT_DOMAIN"; else printf 'http://%s' "$OPT_DOMAIN"; fi
+    if [ "$OPT_NO_TLS" != "1" ] && ! is_ip_address "$OPT_DOMAIN"; then
+      printf 'https://%s' "$OPT_DOMAIN"
+    else
+      printf 'http://%s' "$OPT_DOMAIN"
+    fi
     return 0
   fi
   printf 'http://%s' "$(primary_ip)"
@@ -483,6 +500,10 @@ do_deploy_wordpress() {
     WP theme activate mcr-premium || ui_warn "could not activate theme mcr-premium"
     WP plugin activate mcr-rental-core || ui_warn "could not activate plugin mcr-rental-core"
   fi
+  # Keep the database canonical URL in sync with WP_HOME/WP_SITEURL. This
+  # matters when a previous run incorrectly selected HTTPS for a bare IP.
+  WP option update home "$site" || ui_warn "could not update WordPress home URL"
+  WP option update siteurl "$site" || ui_warn "could not update WordPress site URL"
   WP rewrite structure '/%postname%/' --hard || ui_warn "could not set permalinks"
   WP rewrite flush --hard || ui_warn "could not flush rewrite rules"
   WP option update timezone_string 'Africa/Casablanca' || ui_warn "could not set timezone"
@@ -497,6 +518,7 @@ do_deploy_wordpress() {
   # 6. Ownership: php-fpm user owns the tree (WP writes uploads; web server
   # reads static files via o+rx). MCR_PRIVATE_DIR lives outside the web root.
   local wu; wu="$(web_runtime_user "$OPT_WEB")"
+  [ -n "$wu" ] || { ui_error "Could not determine web runtime user"; return 1; }
   mkdir_p_run "$DATA_DIR/private"
   run_sh "chown -R '$wu':'$wu' '$WWW_DIR' 2>/dev/null || true"
   run_sh "chown -R '$wu':'$wu' '$DATA_DIR/private' 2>/dev/null || true"
@@ -671,8 +693,13 @@ do_vhost() {
 }
 
 vhost_nginx() {
-  local server_name="$1" listen conf content
-  listen="$(php_fpm_listen)"
+  local server_name="$1" listen conf content backup had_old=0
+  listen="$(php_fpm_listen)" || {
+    ui_error "Could not determine PHP-FPM socket; refusing to write an invalid Nginx vhost"
+    return 1
+  }
+  [ -n "$listen" ] || { ui_error "PHP-FPM listen target is empty"; return 1; }
+
   content="$(cat <<EOF
 # MCR Server OS — WordPress vhost (nginx + php-fpm)
 server {
@@ -705,25 +732,51 @@ EOF
   case "$PKG_FAMILY" in
     deb)
       conf="/etc/nginx/sites-available/mcrsoft.conf"
-      install_vhost_file "$conf" "$content"
-      run_sh "ln -sf '$conf' /etc/nginx/sites-enabled/mcrsoft.conf"
-      run_sh "rm -f /etc/nginx/sites-enabled/default"
       ;;
     *)
       conf="/etc/nginx/conf.d/mcrsoft.conf"
-      install_vhost_file "$conf" "$content"
-      # neutralise the distro default server block if present
-      run_sh "[ -f /etc/nginx/conf.d/default.conf ] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled || true"
       ;;
   esac
+
+  backup="${conf}.mcr-backup.$$"
+  if [ "$OPT_DRYRUN" != "1" ] && [ -f "$conf" ]; then
+    cp -a "$conf" "$backup"
+    had_old=1
+  fi
+
+  install_vhost_file "$conf" "$content" || return 1
+  if [ "$PKG_FAMILY" = "deb" ]; then
+    run_sh "ln -sf '$conf' /etc/nginx/sites-enabled/mcrsoft.conf" || return 1
+    run_sh "rm -f /etc/nginx/sites-enabled/default" || return 1
+  else
+    run_sh "[ -f /etc/nginx/conf.d/default.conf ] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled || true"
+  fi
+
+  if ! run nginx -t; then
+    ui_error "Nginx configuration test failed; restoring previous vhost"
+    if [ "$OPT_DRYRUN" != "1" ]; then
+      if [ "$had_old" = "1" ]; then
+        cp -a "$backup" "$conf"
+      else
+        rm -f "$conf"
+        [ "$PKG_FAMILY" != "deb" ] || rm -f /etc/nginx/sites-enabled/mcrsoft.conf
+      fi
+      rm -f "$backup"
+    fi
+    return 1
+  fi
+  [ "$OPT_DRYRUN" = "1" ] || rm -f "$backup"
+
   ui_note "nginx vhost written to $conf (fastcgi_pass $listen)"
-  run nginx -t || ui_warn "nginx -t reported a problem; review $conf"
-  run systemctl reload "$(svc_name web-nginx)" || run systemctl restart "$(svc_name web-nginx)" || ui_note "reload nginx manually"
+  run systemctl reload "$(svc_name web-nginx)" ||
+    run systemctl restart "$(svc_name web-nginx)" ||
+    { ui_error "Nginx config is valid but the service could not reload/restart"; return 1; }
 }
 
 vhost_apache() {
   local server_name="$1" listen conf content proxy
-  listen="$(php_fpm_listen)"
+  listen="$(php_fpm_listen)" || { ui_error "Could not determine PHP-FPM socket for Apache"; return 1; }
+  [ -n "$listen" ] || { ui_error "PHP-FPM listen target is empty"; return 1; }
   # Apache proxies .php to php-fpm (SetHandler). For unix sockets use the
   # unix:/path|fcgi://localhost form; for host:port use fcgi://host:port.
   case "$listen" in
@@ -781,18 +834,13 @@ EOF
 }
 
 do_branding() {
-  local required
-  install_mcrctl_now
-  if [ -z "$BRANDING_DIR" ]; then
-    ui_warn "Branding assets were not found; skipping branding instead of aborting installation"
+  install_mcrctl_now  # ensure mcrctl present so we can call branding on
+  local bsrc="$BRANDING_DIR"
+  [ -d "$bsrc" ] || bsrc="$ETC_DIR/branding-src"
+  if [ ! -r "$bsrc/logo.txt" ] || [ ! -r "$bsrc/os-release.fields" ]; then
+    ui_warn "Branding source assets are incomplete; skipping branding rather than failing the server install"
     return 0
   fi
-  for required in logo.txt mcrsoft-release fastfetch.jsonc neofetch.conf motd profile.d-mcrsoft.sh os-release.fields; do
-    if [ ! -r "$BRANDING_DIR/$required" ]; then
-      ui_warn "Branding asset $required is missing; skipping branding"
-      return 0
-    fi
-  done
   branding_apply on
 }
 
@@ -820,7 +868,9 @@ do_firewall_tls() {
     ui_note "No managed firewall for this distro; configure manually"
   fi
 
-  if [ -n "$OPT_DOMAIN" ] && [ "$OPT_NO_TLS" != "1" ]; then
+  if [ -n "$OPT_DOMAIN" ] && [ "$OPT_NO_TLS" != "1" ] && is_ip_address "$OPT_DOMAIN"; then
+    ui_warn "Let's Encrypt cannot issue a certificate for a bare IP address; keeping this site on HTTP. Use a DNS hostname pointing to this VPS for TLS."
+  elif [ -n "$OPT_DOMAIN" ] && [ "$OPT_NO_TLS" != "1" ]; then
     [ -n "$OPT_EMAIL" ] || { ui_warn "TLS requested but no --email; skipping certbot"; return 0; }
     pm_install "$(pkg_names certbot)" || { ui_note "certbot unavailable; skipping TLS"; return 0; }
     if [ "$OPT_WEB" = "nginx" ]; then
@@ -835,50 +885,40 @@ do_firewall_tls() {
 }
 
 do_install_tooling() {
-  local src="$MCR_SUITE_DIR"
+  local src="${MCR_SRC_DIR:-$SCRIPT_DIR}"
   install_mcrctl_now
-
-  # Keep an already-installed agent if this is a partial installer directory.
-  if [ -r "$src/mcr-agent" ]; then
+  # mcr-agent: install from the suite when available; otherwise preserve an
+  # already installed agent (e.g. when only this patched installer was uploaded).
+  if [ -f "$src/mcr-agent" ]; then
     run_sh "install -m 0755 '$src/mcr-agent' /usr/local/bin/mcr-agent"
-  elif [ ! -x /usr/local/bin/mcr-agent ] && [ "$OPT_DRYRUN" != "1" ]; then
-    ui_warn "mcr-agent source and installed binary are both missing; skipping agent install"
-  fi
-
-  write_regular_file "$ETC_DIR/fleet.pub" "$MCR_FLEET_PUBKEY_DEFAULT"
-
-  if [ -d "$src/systemd" ]; then
-    [ ! -r "$src/systemd/mcr-agent.service" ] || run_sh "install -m 0644 '$src/systemd/mcr-agent.service' /etc/systemd/system/mcr-agent.service"
-    [ ! -r "$src/systemd/mcr-agent.timer" ] || run_sh "install -m 0644 '$src/systemd/mcr-agent.timer' /etc/systemd/system/mcr-agent.timer"
-    [ ! -r "$src/systemd/mcr-web.service" ] || run_sh "install -m 0644 '$src/systemd/mcr-web.service' /etc/systemd/system/mcr-web.service"
-    run systemctl daemon-reload || true
-    if [ -r "$src/systemd/mcr-agent.timer" ]; then
-      run systemctl enable --now mcr-agent.timer || ui_note "enable mcr-agent.timer later (needs enrollment)"
-    fi
+  elif [ -x /usr/local/bin/mcr-agent ]; then
+    ui_note "mcr-agent already installed; preserving existing binary"
   else
-    ui_note "No systemd unit directory in source; keeping any existing units"
+    ui_error "mcr-agent source is missing from '$src' and no installed agent exists"
+    return 1
+  fi
+  # embed pinned fleet pubkey for the agent
+  write_regular_file "$ETC_DIR/fleet.pub" "$MCR_FLEET_PUBKEY_DEFAULT"
+  # systemd units
+  if [ -d "$src/systemd" ]; then
+    run_sh "cp '$src/systemd/mcr-agent.service' /etc/systemd/system/ 2>/dev/null || true"
+    run_sh "cp '$src/systemd/mcr-agent.timer' /etc/systemd/system/ 2>/dev/null || true"
+    run_sh "cp '$src/systemd/mcr-web.service' /etc/systemd/system/ 2>/dev/null || true"
+    run systemctl daemon-reload || true
+    run systemctl enable --now mcr-agent.timer || ui_note "enable mcr-agent.timer later (needs enrollment)"
   fi
   return 0
 }
 
 install_mcrctl_now() {
-  local src="$MCR_SUITE_DIR"
-  if [ ! -x /usr/local/bin/mcrctl ]; then
-    if [ -r "$src/mcrctl" ]; then
-      run_sh "install -m 0755 '$src/mcrctl' /usr/local/bin/mcrctl"
-    elif [ "$OPT_DRYRUN" != "1" ]; then
-      ui_warn "mcrctl source is missing and /usr/local/bin/mcrctl is not installed"
-    fi
-  fi
-
-  # Make the selected libraries and branding available to system tools.
+  local src="${MCR_SRC_DIR:-$SCRIPT_DIR}"
+  [ -x /usr/local/bin/mcrctl ] && return 0
+  run_sh "install -m 0755 '$src/mcrctl' /usr/local/bin/mcrctl 2>/dev/null || cp '$src/mcrctl' /usr/local/bin/mcrctl"
+  run_sh "chmod 0755 /usr/local/bin/mcrctl"
+  # make libs + branding available system-wide for mcrctl/agent
   mkdir_p_run /usr/local/lib/mcrsoft "$ETC_DIR"
-  if [ -n "$LIB_DIR" ]; then
-    run_sh "install -m 0644 '$LIB_DIR/ui.sh' '$LIB_DIR/distro.sh' /usr/local/lib/mcrsoft/"
-  fi
-  if [ -n "$BRANDING_DIR" ] && [ -d "$BRANDING_DIR" ]; then
-    run_sh "mkdir -p '$ETC_DIR/branding-src' && cp -a '$BRANDING_DIR/.' '$ETC_DIR/branding-src/'"
-  fi
+  run_sh "cp '$src/lib/ui.sh' '$src/lib/distro.sh' /usr/local/lib/mcrsoft/ 2>/dev/null || true"
+  run_sh "cp -r '$src/branding' '$ETC_DIR/branding-src' 2>/dev/null || true"
 }
 
 do_enroll() {
@@ -890,7 +930,49 @@ do_enroll() {
     ui_note "(dry-run) would run: mcr-agent enroll '$OPT_FLEET_URL' <token-redacted>"
     return 0
   fi
-  MCR_FLEET_URL="$OPT_FLEET_URL" /usr/local/bin/mcr-agent enroll "$OPT_FLEET_URL" "$OPT_ENROLL_TOKEN"
+  [ -x /usr/local/bin/mcr-agent ] || {
+    ui_error "Enrollment unavailable: /usr/local/bin/mcr-agent is missing or not executable"
+    return 1
+  }
+
+  local out rc code body probe_url
+  out="$(mktemp)"
+  body="$(mktemp)"
+  if MCR_FLEET_URL="$OPT_FLEET_URL" /usr/local/bin/mcr-agent enroll "$OPT_FLEET_URL" "$OPT_ENROLL_TOKEN" >"$out" 2>&1; then
+    sed "s/${OPT_ENROLL_TOKEN//\//\\/}/[REDACTED]/g" "$out"
+    rm -f "$out" "$body"
+    return 0
+  else
+    rc=$?
+  fi
+
+  ui_error "Fleet enrollment command failed (exit $rc). Agent output:"
+  # Do not ever echo the enrollment token if the agent accidentally includes it.
+  sed "s/${OPT_ENROLL_TOKEN//\//\\/}/[REDACTED]/g" "$out" | tail -n 30
+  probe_url="${OPT_FLEET_URL%/}/"
+  code="$(curl -sS -L --connect-timeout 8 --max-time 20 -o "$body" -w '%{http_code}' "$probe_url" 2>"$out" || true)"
+  if [ -z "$code" ] || [ "$code" = "000" ]; then
+    ui_error "Fleet URL is unreachable from this VPS. Network/TLS/DNS detail:"
+    tail -n 5 "$out" || true
+    ui_note "Check DNS, HTTPS certificate, outbound port 443, and the Fleet site's availability."
+  else
+    ui_note "Fleet REST endpoint probe: HTTP $code ($probe_url)"
+    case "$code" in
+      2*) ui_warn "The REST root is reachable. The enrollment rejection is likely in the Fleet enrollment route, token validity/expiry, site policy, or agent/API protocol. The agent currently returned no detailed server response." ;;
+      3*) ui_warn "The REST root redirected. Check the canonical Fleet URL and HTTPS redirect configuration." ;;
+      401|403) ui_warn "The REST root itself requires authorization or denies access. Check WordPress security/access rules." ;;
+      404) ui_warn "The supplied /wp-json endpoint returned 404. Check WordPress permalinks, REST API availability, and the Fleet plugin route registration." ;;
+      5*) ui_warn "The Fleet web server returned a server-side error. Inspect the WordPress/PHP and web-server logs on the Fleet host." ;;
+      *) ui_warn "Unexpected HTTP response from the Fleet REST root. Inspect the response body below." ;;
+    esac
+    if [ -s "$body" ]; then
+      printf '%s\n' "--- Fleet response (first 1200 bytes) ---"
+      head -c 1200 "$body" | tr -cd '\11\12\15\40-\176'
+      printf '\n%s\n' "--- end Fleet response ---"
+    fi
+  fi
+  rm -f "$out" "$body"
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -977,5 +1059,72 @@ primary_ip() {
   ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' \
     || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
 }
+
+
+# ---- Debian/systemd compatibility helpers -----------------------------------
+# Keep these local fallbacks in the installer: older distro.sh bundles may not
+# provide these helpers, which previously produced an empty fastcgi_pass.
+php_fpm_service() {
+  local unit
+  for unit in $(systemctl list-unit-files --type=service --no-legend 2>/dev/null |
+                awk '{print $1}' | grep -E '^php([0-9.]+)?-fpm\.service$' | sort -Vr); do
+    printf '%s' "${unit%.service}"
+    return 0
+  done
+  for unit in php-fpm php8.4-fpm php8.3-fpm php8.2-fpm php8.1-fpm; do
+    if [ -f "/lib/systemd/system/$unit.service" ] ||
+       [ -f "/usr/lib/systemd/system/$unit.service" ] ||
+       systemctl cat "$unit.service" >/dev/null 2>&1; then
+      printf '%s' "$unit"
+      return 0
+    fi
+  done
+  return 1
+}
+
+php_fpm_listen() {
+  local sock cfg val
+  # Prefer a real socket created by a running FPM pool.
+  sock="$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' -print -quit 2>/dev/null || true)"
+  if [ -n "$sock" ]; then
+    printf 'unix:%s' "$sock"
+    return 0
+  fi
+  # If FPM is installed but not yet started, read the configured pool socket.
+  for cfg in /etc/php/*/fpm/pool.d/www.conf; do
+    [ -r "$cfg" ] || continue
+    val="$(awk -F'=' '/^[[:space:]]*listen[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' "$cfg")"
+    if [ -n "$val" ]; then
+      case "$val" in
+        /*) printf 'unix:%s' "$val" ;;
+        *) printf '%s' "$val" ;;
+      esac
+      return 0
+    fi
+  done
+  return 1
+}
+
+web_runtime_user() {
+  case "${1:-nginx}" in
+    apache)
+      getent passwd www-data >/dev/null 2>&1 && { printf www-data; return; }
+      getent passwd apache >/dev/null 2>&1 && { printf apache; return; }
+      ;;
+    *)
+      getent passwd www-data >/dev/null 2>&1 && { printf www-data; return; }
+      getent passwd nginx >/dev/null 2>&1 && { printf nginx; return; }
+      ;;
+  esac
+  printf root
+}
+
+is_ip_address() {
+  case "${1:-}" in
+    *:*) return 0 ;; # IPv6 literal
+  esac
+  [[ "${1:-}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
 
 main "$@"
